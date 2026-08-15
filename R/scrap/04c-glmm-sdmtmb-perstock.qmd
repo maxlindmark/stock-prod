@@ -1,0 +1,258 @@
+---
+title: "Per-stock models: sdmTMB with a year smooth, Student-t errors"
+author: "Max Lindmark"
+date: today
+date-format: iso
+toc: true
+format:
+  html:
+    page-layout: full
+    embed-resources: true
+knitr:
+  opts_chunk:
+    fig.align: center
+    out-width: 100%
+editor: source
+---
+
+## Why this model
+
+One independent model per stock, each with its own `s(year)` smooth plus
+SST/salinity/NAO effects, `family = student()`. This is different from the
+per-stock random-walk / AR1 attempts in `04b-glmm-sdmtmb.qmd`, which failed
+because a RW/AR1 gives roughly one free parameter per year, matching the
+number of yearly observations almost exactly, which saturates. A penalized
+regression spline `s(year, k = ...)` with a modest `k` (well below each
+stock's number of years) has strictly fewer effective parameters than years
+by construction, and its wiggliness is further constrained by REML-style
+penalty selection, so it doesn't hit the same saturation failure.
+
+Figures below match the style already built for `m2b` in `04-glmm-brms.qmd`
+(fixed-effect distribution, per-stock slope caterpillar plot, year-effect
+panels, trajectories colored by SST slope), but built from 79 independent
+per-stock fits rather than one shared mixed model, and none of them facet by
+stock (all stocks overlaid in a single panel instead).
+
+## Read and wrangle data
+
+```{r}
+#| warning: false
+#| message: false
+
+library(sdmTMB)
+library(dplyr)
+library(tidyr)
+library(readr)
+library(slider)
+library(purrr)
+library(ggplot2)
+library(viridis)
+library(ggsidekick)
+theme_set(theme_sleek())
+
+home <- here::here()
+
+dat <- read_csv(paste0(home, "/output/dat.csv"))
+
+nao <- read_csv(paste0(home, "/data/env/NAO data - extended time series.csv")) |>
+  dplyr::rename(year = Year)
+
+nao <- nao |>
+  arrange(year) |>
+  mutate(nao = slide_dbl(winter_NAO, mean, .before = 4, .complete = TRUE))
+
+mid_year <- round(median(1959:2022))
+
+# ML: Same data prep as 04-glmm-brms.qmd / 04b-glmm-hgam.qmd, kept identical
+# so results are comparable across all modeling approaches tried.
+d <- dat |>
+  mutate(
+    species_f = as.factor(Species),
+    stock_f = as.factor(stock),
+    year_ct = year - mid_year
+  ) |>
+  group_by(stock_f, species_f) |>
+  arrange(year, .by_group = TRUE) |>
+  mutate(
+    sst_lag1      = lag(sst, 1),
+    salinity_lag1 = lag(salinity, 1)
+  ) |>
+  ungroup() |>
+  filter(year >= 1959) |>
+  left_join(nao, by = "year") |>
+  mutate(
+    sst_sc_lag1       = (sst_lag1 - mean(sst_lag1, na.rm = TRUE)) / sd(sst_lag1, na.rm = TRUE),
+    salinity_sc_lag1  = (salinity_lag1 - mean(salinity_lag1, na.rm = TRUE)) / sd(salinity_lag1, na.rm = TRUE),
+    .by = stock_f
+  ) |>
+  mutate(nao_sc = as.numeric(scale(nao))) |>
+  mutate(
+    b0_sc = (b0 - mean(b0, na.rm = TRUE)) / sd(b0, na.rm = TRUE),
+    .by = stock_f
+  ) |>
+  tidyr::drop_na(b0_sc, sst_sc_lag1, salinity_sc_lag1, nao_sc) |>
+  droplevels()
+
+d |> summarise(n_years = n_distinct(year), .by = stock_f) |> pull(n_years) |> summary()
+```
+
+## Fit one model per stock
+
+```{r}
+# ML: k = 5, well below the shortest stock's series length (17 years), so
+# REML has room to shrink further rather than hitting one-parameter-per-year
+# saturation the way the RW/AR1 attempts did.
+stock_list <- levels(d$stock_f)
+
+fit_one_stock <- function(st, dd) {
+  fit <- sdmTMB(
+    b0_sc ~ s(year, k = 5) + sst_sc_lag1 + salinity_sc_lag1 + nao_sc,
+    spatial = "off",
+    spatiotemporal = "off",
+    data = dd,
+    family = student()
+  )
+
+  coefs <- tidy(fit, "fixed", conf.int = TRUE) |>
+    mutate(stock_f = st)
+
+  # ML: Marginal year effect -- predicted at reference covariate values (0).
+  nd_marginal <- tibble(
+    year = min(dd$year):max(dd$year),
+    sst_sc_lag1 = 0,
+    salinity_sc_lag1 = 0,
+    nao_sc = 0
+  )
+  marginal <- predict(fit, newdata = nd_marginal, se_fit = TRUE) |>
+    mutate(stock_f = st)
+
+  # ML: Full on-data prediction -- each row's own actual observed
+  # SST/salinity/NAO for that stock-year, not held at a reference value.
+  full_pred <- predict(fit, newdata = dd, se_fit = TRUE) |>
+    mutate(stock_f = st)
+
+  list(fit = fit, coefs = coefs, marginal = marginal, full_pred = full_pred, ok = TRUE, error = NA)
+}
+
+results <- vector("list", length(stock_list))
+names(results) <- stock_list
+
+for (st in stock_list) {
+  dd <- d |> filter(stock_f == st) |> droplevels()
+  res <- tryCatch(
+    fit_one_stock(st, dd),
+    error = function(e) list(fit = NULL, coefs = NULL, marginal = NULL, full_pred = NULL, ok = FALSE, error = conditionMessage(e))
+  )
+  results[[st]] <- res
+  cat(st, "- ok:", res$ok, if (!res$ok) paste("- ERROR:", res$error) else "", "\n")
+}
+
+saveRDS(results, paste0(home, "/output/sdmtmb_per_stock_results.rds"))
+
+ok_stocks <- names(results)[map_lgl(results, ~ isTRUE(.x$ok))]
+cat("\nFit successfully:", length(ok_stocks), "of", length(stock_list), "stocks\n")
+```
+
+## Fixed effects across stocks (matches pars.pdf style)
+
+```{r}
+coefs_all <- map_dfr(results[ok_stocks], "coefs")
+
+coefs_all |>
+  filter(term %in% c("sst_sc_lag1", "salinity_sc_lag1", "nao_sc")) |>
+  mutate(term = recode(term, sst_sc_lag1 = "SST", salinity_sc_lag1 = "Salinity", nao_sc = "NAO")) |>
+  ggplot(aes(x = estimate, fill = term)) +
+  geom_vline(xintercept = 0, linetype = "dashed") +
+  geom_density(alpha = 0.5) +
+  facet_wrap(~term, ncol = 1, scales = "free") +
+  guides(fill = "none") +
+  labs(x = "Per-stock estimate", y = "Density")
+
+ggsave(paste0(home, "/figures/supp/sdmtmb_perstock_pars.pdf"), width = 14, height = 16, units = "cm")
+```
+
+## Caterpillar plot: per-stock SST and salinity slopes (matches stock_slopes.pdf style)
+
+```{r}
+stock_slopes <- coefs_all |>
+  filter(term %in% c("sst_sc_lag1", "salinity_sc_lag1")) |>
+  mutate(
+    covariate = recode(term, sst_sc_lag1 = "SST", salinity_sc_lag1 = "Salinity"),
+    covariate = factor(covariate, levels = c("SST", "Salinity")),
+    sig = case_when(
+      conf.low > 0 ~ "Positive sig.",
+      conf.high < 0 ~ "Negative sig.",
+      TRUE ~ "No effect"
+    )
+  )
+
+ggplot(stock_slopes) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "grey50") +
+  geom_errorbarh(aes(y = stock_f, xmin = conf.low, xmax = conf.high, color = sig), height = 0) +
+  geom_point(aes(y = stock_f, x = estimate, color = sig), size = 1.5) +
+  scale_color_manual(values = c(
+    "Positive sig." = "steelblue",
+    "Negative sig." = "tomato",
+    "No effect"     = "grey70"
+  )) +
+  facet_wrap(~covariate, ncol = 2) +
+  labs(x = "Estimate (independent per-stock model)", y = NULL) +
+  theme(
+    legend.title = element_blank(),
+    legend.position = "bottom",
+    strip.background = element_blank(),
+    axis.text.y = element_text(size = 5)
+  )
+
+ggsave(paste0(home, "/figures/supp/sdmtmb_perstock_slopes.pdf"), width = 20, height = 22, units = "cm")
+```
+
+## Year effect: all stocks overlaid, not faceted (matches year_preds.pdf / stock_trends_by_temp.pdf style)
+
+```{r}
+marginal_all <- map_dfr(results[ok_stocks], "marginal") |>
+  left_join(stock_slopes |> filter(covariate == "SST") |> select(stock_f, sst_total_slope = estimate), by = "stock_f")
+
+ggplot(marginal_all, aes(year, est, color = sst_total_slope, group = stock_f)) +
+  geom_line(alpha = 0.7, linewidth = 0.4) +
+  scale_color_viridis(option = "magma", end = 0.9) +
+  labs(
+    x = "Year",
+    y = expression(paste("Marginal predicted ", B[0], " (scaled), reference covariates")),
+    color = "SST slope"
+  ) +
+  guides(color = guide_colorbar(position = "inside", title.position = "top")) +
+  theme(
+    legend.position.inside = c(0.15, 0.12),
+    legend.key.width = unit(0.65, "cm"),
+    legend.key.height = unit(0.25, "cm"),
+    legend.direction = "horizontal"
+  )
+
+ggsave(paste0(home, "/figures/supp/sdmtmb_perstock_year_marginal.pdf"), width = 19, height = 14, units = "cm")
+```
+
+## On-data prediction: all stocks overlaid, not faceted
+
+```{r}
+full_pred_all <- map_dfr(results[ok_stocks], "full_pred") |>
+  left_join(stock_slopes |> filter(covariate == "SST") |> select(stock_f, sst_total_slope = estimate), by = "stock_f")
+
+ggplot(full_pred_all, aes(year, est, color = sst_total_slope, group = stock_f)) +
+  geom_line(alpha = 0.7, linewidth = 0.4) +
+  scale_color_viridis(option = "magma", end = 0.9) +
+  labs(
+    x = "Year",
+    y = expression(paste("Predicted ", B[0], " (scaled), actual covariate values")),
+    color = "SST slope"
+  ) +
+  guides(color = guide_colorbar(position = "inside", title.position = "top")) +
+  theme(
+    legend.position.inside = c(0.15, 0.12),
+    legend.key.width = unit(0.65, "cm"),
+    legend.key.height = unit(0.25, "cm"),
+    legend.direction = "horizontal"
+  )
+
+ggsave(paste0(home, "/figures/supp/sdmtmb_perstock_full_pred.pdf"), width = 19, height = 14, units = "cm")
+```
