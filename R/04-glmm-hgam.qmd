@@ -742,7 +742,7 @@ p1 <- ggplot(sst_slopes, aes(y = stock_f, x = estimate, xmin = conf.low, xmax = 
 
 tag_facet(p1, open = "", close = "", fontface = 1, tag_pool = c("A", "B", "C"))
 
-ggsave(paste0(home, "/figures/supp/hgam_sst_concurvity_check.pdf"), width = 28, height = 23, units = "cm")
+ggsave(paste0(home, "/figures/supp/hgam_sst_concurvity_check.pdf"), width = 24, height = 23, units = "cm")
 ```
 
 ### SST vs trend-model residuals (no pooling)
