@@ -38,6 +38,7 @@ library(ggsidekick)
 library(egg)
 library(ggrepel)
 library(RColorBrewer)
+library(ggeffects)
 
 theme_set(theme_sleek())
 
@@ -65,7 +66,12 @@ d <- dat |>
     .by = stock_f
   ) |>
   mutate(
-    b0_sc = (b0 - mean(b0, na.rm = TRUE)) / sd(b0, na.rm = TRUE),
+    # Store the per-stock mean/sd used to build b0_sc so the back-transform (b0_stats, below)
+    # always inverts b0_sc with the exact same constants, even though drop_na() afterwards
+    # removes rows (e.g. the first year of each stock, lacking sst_lag1) from the fitting data.
+    b0_mean_stock = mean(b0, na.rm = TRUE),
+    b0_sd_stock = sd(b0, na.rm = TRUE),
+    b0_sc = (b0 - b0_mean_stock) / b0_sd_stock,
     .by = stock_f
   ) |>
   tidyr::drop_na(b0_sc, sst_sc_lag1) |>
@@ -123,7 +129,12 @@ nd$global_upr <- nd$global + 1.96 * nd$global_se
 ## Model fit against raw data
 
 ```{r}
-b0_stats <- d |> summarise(b0_mean = mean(b0, na.rm = TRUE), b0_sd = sd(b0, na.rm = TRUE), .by = stock_f)
+b0_stats <- d |> distinct(stock_f, b0_mean = b0_mean_stock, b0_sd = b0_sd_stock)
+
+# b0 = B0(t) / virgin biomass (see 02-b0.R), not B0(t)/mean(B0(t)), so b0_mean is a per-stock
+# average depletion level and is not expected to equal 1. What must hold is that b0_stats uses
+# the exact same mean/sd that built b0_sc, which is now guaranteed by construction above.
+stopifnot(all(b0_stats$b0_sd > 0))
 
 fit_raw <- nd |>
   left_join(b0_stats, by = "stock_f") |>
@@ -216,7 +227,7 @@ ggplot() +
 ggsave(paste0(home, "/figures/hgam_all_stocks_overlaid.pdf"), width = 21, height = 21, units = "cm")
 ```
 
-## Species and life-history associations with trajectory trend (delta)
+## Stock trajectories (delta)
 
 ```{r}
 #| warning: false
@@ -233,74 +244,88 @@ traj_summary <- nd |>
     .groups = "drop"
   )
 
-# delta-difference: compares year 1995 vs year 2019 exactly. Stocks lacking either of those two years (i.e. whose assessment doesn't bracket 1995-2019) are omitted below.
+# Approach below based on Wood 2017; 4.8.4 Bayesian confidence intervals for non-linear functions of parameters
+# Loop through each stock and take the prediction for 2019 and 1995. 
+# Get the uncertainty on the delta of those predictions by simulating 2000 draws of the model's coefficients from their approximate sampling distribution (Wood, 2017). 
+# Each draw givs a realisation of a simulated b0_sc at 1995 and 2019, which is then back-transformed to raw B0 using the stock's own mean and SD and converted to a percent change.
+# We take the median, SD and quantiles of the distribution of percentages
+# Draws where the simulated raw B0 falls at or below zero (biologically impossible but can happen here since the model's response variable is a z-scored variable) are also tracked. 
+# Stocks lacking either boundary year are dropped below (n=1).
 
-get_trend_windows <- function(yrs) {
-  list(early = 1995, late = 2019)
-}
+nsim <- 2000 # posterior draws per stock
+b <- coef(m_hgam) # fitted coefficients (same for every stock)
+V <- vcov(m_hgam, unconditional = TRUE) # coefficient covariance (includes smoothing-parameter uncertainty)
 
-get_trend_delta <- function(stock_id, model, nd_data) {
-  sub <- nd_data |> filter(stock_f == stock_id, year >= 1995, year <= 2019)
-  win <- get_trend_windows(sub$year)
-  sub_early <- sub |> filter(year %in% win$early)
-  sub_late <- sub |> filter(year %in% win$late)
-  if (nrow(sub_early) == 0 || nrow(sub_late) == 0) {
-    return(tibble(trend_delta = NA_real_, se_trend_delta = NA_real_, n_yr_span = NA_real_))
+trend_list <- vector("list", nrow(traj_summary)) # one slot per stock, filled in the loop below
+
+for (i in seq_len(nrow(traj_summary))) { # one iteration per stock in traj_summary
+  stock_id <- traj_summary$stock_f[i] # the stock this iteration is computing
+
+  sub <- nd |> filter(stock_f == stock_id, year %in% c(1995, 2019)) # this stock's 1995 and 2019 rows only
+
+  if (!all(c(1995, 2019) %in% sub$year)) { # stock doesn't bracket 1995-2019 -> store an NA row and move on
+    trend_list[[i]] <- tibble(
+      stock_f = stock_id,
+      pct_change_total = NA_real_, pct_sd = NA_real_, pct_lwr = NA_real_, pct_upr = NA_real_,
+      prop_early_nonpos = NA_real_, prop_late_nonpos = NA_real_
+    )
+    next
   }
-  Xp_early <- predict(model, newdata = sub_early, type = "lpmatrix")
-  Xp_late <- predict(model, newdata = sub_late, type = "lpmatrix")
-  contrast <- colMeans(Xp_late) - colMeans(Xp_early)
-  tibble(
-    trend_delta = as.numeric(contrast %*% coef(model)),
-    se_trend_delta = sqrt(as.numeric(contrast %*% vcov(model, unconditional = TRUE) %*% contrast)),
-    n_yr_span = mean(win$late) - mean(win$early)
+  
+  # Ith stock's b0_mean/b0_sd, to back-transform b0_sc to raw b0
+  st <- b0_stats |> filter(stock_f == stock_id) 
+
+  # Grab the design matrix for each year in nd pred
+  Xp <- predict(m_hgam, newdata = sub, type = "lpmatrix")
+  ce <- Xp[sub$year == 1995, ]
+  cl <- Xp[sub$year == 2019, ]
+
+  # Draw nsim (rows) random coefficient vectors from a MVN with covariance V
+  B <- mgcv::rmvn(nsim, b, V)
+  # Multiply realized simulated coefficient with the design matrix row and rescale back to b0!
+  early <- as.numeric(B %*% ce) * st$b0_sd + st$b0_mean 
+  late  <- as.numeric(B %*% cl) * st$b0_sd + st$b0_mean 
+  # Percent change
+  pct <- (late / early - 1) * 100
+
+  trend_list[[i]] <- tibble(
+    stock_f = stock_id, 
+    pct_change_total = median(pct), # median change in percent across stocks
+    pct_sd = sd(pct), # empirical SD of the simulated % change (used as a precision weight downstream)
+    pct_lwr = unname(quantile(pct, 0.025)), # 2.5th percentile of simulated % change
+    pct_upr = unname(quantile(pct, 0.975)), # 97.5th percentile of simulated % change
+    prop_early_nonpos = mean(early <= 0), # share of draws where simulated 1995 b0 was <= 0
+    prop_late_nonpos = mean(late <= 0) # share of draws where simulated 2019 b0 was <= 0
   )
 }
+
+trend_dat <- bind_rows(trend_list)
 
 traj_summary <- traj_summary |>
-  bind_cols(map_dfr(traj_summary$stock_f, get_trend_delta, model = m_hgam, nd_data = nd)) |>
-  filter(!is.na(trend_delta))
+  left_join(trend_dat, by = "stock_f") |>
+  filter(!is.na(pct_change_total)) # drop stocks missing 1995 or 2019
 
-# Back-transform the fitted b0_sc curve to raw B0 using each stock's own mean/SD (the same ones used to construct b0_sc in the data-prep step), then express the same early-window vs late-window comparison as trend_delta uses as a % change. Reuses get_trend_windows so the windows (and thus n_yr_span) match trend_delta exactly.
-
-get_pct_change_window <- function(year, pred_raw) {
-  win <- get_trend_windows(year)
-  early_idx <- year %in% win$early
-  late_idx <- year %in% win$late
-  if (!any(early_idx) || !any(late_idx)) {
-    return(tibble(early_raw = NA_real_, late_raw = NA_real_, n_yr_span = NA_real_))
-  }
-  tibble(
-    early_raw = mean(pred_raw[early_idx]),
-    late_raw  = mean(pred_raw[late_idx]),
-    n_yr_span = mean(win$late) - mean(win$early)
-  )
+# Sanity checks before reporting
+cat("min(pred_raw) across all stocks/years:", min(fit_raw$pred_raw), "\n")
+flagged <- traj_summary |> filter(prop_early_nonpos > 0)
+if (nrow(flagged) > 0) {
+  cat(nrow(flagged), "stock(s) dropped: posterior draws with 1995 B0 <= 0:\n")
+  print(flagged |> select(stock_f, pct_change_total, prop_early_nonpos, prop_late_nonpos))
+} else {
+  cat("No stocks have posterior draws with 1995 B0 <= 0.\n")
 }
 
-pct_change <- nd |>
-  left_join(b0_stats, by = "stock_f") |>
-  mutate(pred_raw = pred * b0_sd + b0_mean) |>
-  filter(year >= 1995, year <= 2019) |>
-  group_by(stock_f) |>
-  reframe(get_pct_change_window(year, pred_raw)) |>
-  mutate(
-    pct_change_total  = (late_raw - early_raw) / early_raw * 100,
-    pct_change_annual = ((late_raw / early_raw)^(1 / n_yr_span) - 1) * 100
-  ) |>
-  filter(!is.na(pct_change_total))
+traj_summary <- traj_summary |> filter(prop_early_nonpos == 0)
 
-# Significance of trend_delta
+pct_change <- traj_summary |> select(stock_f, pct_change_total)
+
+# Significance: CI (from the same simulation as pct_change_total, so consistent with it) excludes 0.
 traj_summary <- traj_summary |>
-  mutate(
-    trend_delta_lwr = trend_delta - 1.96 * se_trend_delta,
-    trend_delta_upr = trend_delta + 1.96 * se_trend_delta,
-    trend_delta_sig = trend_delta_lwr > 0 | trend_delta_upr < 0
-  )
+  mutate(pct_sig = pct_lwr > 0 | pct_upr < 0)
 
 tibble(
   metric = c(
     "Median cumulative % change (1995 to 2019)",
-    "Median annualized % change",
     "Stocks declining (point estimate)",
     "Stocks increasing (point estimate)",
     "Stocks declining (95% CI excludes 0)",
@@ -308,16 +333,89 @@ tibble(
   ),
   value = c(
     sprintf("%.1f%%", median(pct_change$pct_change_total)),
-    sprintf("%.2f%%/yr", median(pct_change$pct_change_annual)),
     sprintf("%d of %d", sum(pct_change$pct_change_total < 0), nrow(pct_change)),
     sprintf("%d of %d", sum(pct_change$pct_change_total > 0), nrow(pct_change)),
-    sprintf("%d of %d", sum(traj_summary$trend_delta_sig & traj_summary$trend_delta < 0), nrow(traj_summary)),
-    sprintf("%d of %d", sum(traj_summary$trend_delta_sig & traj_summary$trend_delta > 0), nrow(traj_summary))
+    sprintf("%d of %d", sum(traj_summary$pct_sig & traj_summary$pct_change_total < 0), nrow(traj_summary)),
+    sprintf("%d of %d", sum(traj_summary$pct_sig & traj_summary$pct_change_total > 0), nrow(traj_summary))
   )
 )
+```
 
-traj_summary <- traj_summary |> left_join(select(pct_change, -n_yr_span), by = "stock_f")
+### Plot delta prediction (2019 vs 1995)
 
+```{r}
+stock_order <- traj_summary |>
+  arrange(pct_change_total) |>
+  pull(stock_f)
+
+# pct_lwr/pct_upr come directly from the coefficient-posterior simulation above,
+# so this CI already accounts for the ratio's skew.
+cater_dat <- traj_summary |>
+  transmute(
+    stock_f,
+    estimate = pct_change_total,
+    conf.low = pct_lwr,
+    conf.high = pct_upr
+  ) |>
+  mutate(
+    sig = case_when(
+      conf.low > 0 ~ "Positive sig.",
+      conf.high < 0 ~ "Negative sig.",
+      TRUE ~ "No effect"
+    ),
+    stock_f = factor(stock_f, levels = stock_order)
+  )
+
+n_stocks <- n_distinct(cater_dat$stock_f)
+median_pct <- median(cater_dat$estimate)
+
+pct_dat <- cater_dat |>
+  count(sig) |>
+  mutate(pct = round(100 * n / sum(n))) |>
+  mutate(
+    label = case_when(
+      sig == "Positive sig." ~ sprintf("Increasing: %d%%", pct),
+      sig == "Negative sig." ~ sprintf("Decreasing: %d%%", pct),
+      TRUE ~ sprintf("No change: %d%%", pct)
+    ),
+    y_pos = case_when(
+      sig == "Positive sig." ~ 3,
+      sig == "No effect" ~ 4.5,
+      sig == "Negative sig." ~ 6
+    )
+  )
+
+ggplot(cater_dat, aes(y = stock_f, x = estimate, xmin = conf.low, xmax = conf.high, color = sig)) +
+  geom_vline(xintercept = 0, color = "grey50", linetype = 2) +
+  geom_vline(xintercept = median_pct, color = "grey20", linetype = 3) +
+  geom_errorbarh(height = 0) +
+  geom_point(size = 1) +
+  geom_text(
+    data = pct_dat, aes(x = Inf, y = y_pos, label = label, color = sig),
+    inherit.aes = FALSE, hjust = 1.05, size = 3, show.legend = FALSE
+  ) +
+  annotate(
+    "text", x = Inf, y = 1.5, label = sprintf("Median change: %.0f%%", median_pct),
+    hjust = 1.05, size = 3, color = "grey20"
+  ) +
+  scale_color_manual(values = c(
+    "Positive sig." = "steelblue",
+    "Negative sig." = "tomato",
+    "No effect"     = "grey70"
+  )) +
+  labs(x = expression(paste("Percent change in ", B[0])), y = NULL) +
+  theme(
+    legend.title = element_blank(),
+    legend.position = "bottom"
+  )
+
+ggsave(paste0(home, "/figures/hgam_trend_since_1995_caterpillar.pdf"), width = 14, height = 24, units = "cm")
+```
+
+## Life history and habitat variables affecting delta
+### Add life history traits, taxonomy and habitat variables
+
+```{r}
 # Life-history traits + species, from icesdata's fishlife attribute
 traits <- names(icesdata) |>
   map(function(stock_name) {
@@ -387,89 +485,18 @@ traj_traits <- traj_summary |>
 saveRDS(traj_traits, paste0(home, "/output/traj_traits.rds"))
 ```
 
-### Delta prediction (2019 vs 1995)
-
-```{r}
-stock_order <- traj_summary |>
-  arrange(pct_change_total) |>
-  pull(stock_f)
-
-# pct_change_total is the exact back-transformed % change; trend_delta/se_trend_delta only exist on the b0_sc scale. Since pct_change_total = trend_delta * (b0_sd / early_raw) for each stock (b0_sd > 0), that same per-stock ratio rescales the b0_sc-scale CI onto the % scale while keeping it exactly consistent with the plotted point estimate.
-cater_dat <- traj_summary |>
-  mutate(pct_scale = pct_change_total / trend_delta) |>
-  transmute(
-    stock_f,
-    estimate = pct_change_total,
-    conf.low = (trend_delta - 1.96 * se_trend_delta) * pct_scale,
-    conf.high = (trend_delta + 1.96 * se_trend_delta) * pct_scale
-  ) |>
-  mutate(
-    sig = case_when(
-      conf.low > 0 ~ "Positive sig.",
-      conf.high < 0 ~ "Negative sig.",
-      TRUE ~ "No effect"
-    ),
-    stock_f = factor(stock_f, levels = stock_order)
-  )
-
-n_stocks <- n_distinct(cater_dat$stock_f)
-median_pct <- median(cater_dat$estimate)
-
-pct_dat <- cater_dat |>
-  count(sig) |>
-  mutate(pct = round(100 * n / sum(n))) |>
-  mutate(
-    label = case_when(
-      sig == "Positive sig." ~ sprintf("Increasing: %d%%", pct),
-      sig == "Negative sig." ~ sprintf("Decreasing: %d%%", pct),
-      TRUE ~ sprintf("No change: %d%%", pct)
-    ),
-    y_pos = case_when(
-      sig == "Positive sig." ~ 3,
-      sig == "No effect" ~ 4.5,
-      sig == "Negative sig." ~ 6
-    )
-  )
-
-ggplot(cater_dat, aes(y = stock_f, x = estimate, xmin = conf.low, xmax = conf.high, color = sig)) +
-  geom_vline(xintercept = 0, color = "grey50", linetype = 2) +
-  geom_vline(xintercept = median_pct, color = "grey20", linetype = 3) +
-  geom_errorbarh(height = 0) +
-  geom_point(size = 1) +
-  geom_text(
-    data = pct_dat, aes(x = Inf, y = y_pos, label = label, color = sig),
-    inherit.aes = FALSE, hjust = 1.05, size = 3, show.legend = FALSE
-  ) +
-  annotate(
-    "text", x = Inf, y = 1.5, label = sprintf("Median change: %.0f%%", median_pct),
-    hjust = 1.05, size = 3, color = "grey20"
-  ) +
-  scale_color_manual(values = c(
-    "Positive sig." = "steelblue",
-    "Negative sig." = "tomato",
-    "No effect"     = "grey70"
-  )) +
-  labs(x = expression(paste("Percent change in ", B[0])), y = NULL) +
-  theme(
-    legend.title = element_blank(),
-    legend.position = "bottom"
-  )
-
-ggsave(paste0(home, "/figures/hgam_trend_since_1995_caterpillar.pdf"), width = 14, height = 24, units = "cm")
-```
-
 ### Trend by habitat guild
 
 ```{r}
-summary(aov(trend_delta ~ habitat_guild3, data = traj_traits |> filter(!is.na(habitat_guild3))))
+summary(aov(pct_change_total ~ habitat_guild3, data = traj_traits |> filter(!is.na(habitat_guild3))))
 
 traj_traits |>
   filter(!is.na(habitat_guild3)) |>
-  ggplot(aes(reorder(habitat_guild3, trend_delta, median), trend_delta)) +
+  ggplot(aes(reorder(habitat_guild3, pct_change_total, median), pct_change_total)) +
   geom_boxplot(outlier.shape = NA) +
   geom_jitter(width = 0.1, alpha = 0.5) +
   coord_flip() +
-  labs(x = NULL, y = "Trajectory trend (delta)")
+  labs(x = NULL, y = "Percent change in B0 (1995-2019)")
 
 ggsave(paste0(home, "/figures/supp/hgam_trend_by_habitat.pdf"), width = 18, height = 10, units = "cm")
 ```
@@ -494,27 +521,25 @@ traj_traits <- traj_traits |>
     age_maturity_z = (age_maturity - age_ctr) / age_sd
   )
 
-m_joint <- lm(
-  trend_delta ~ mean_F_z + linf_z + k_z + age_maturity_z,
-  data = traj_traits, weights = 1 / se_trend_delta^2
+fit <- lm(
+  pct_change_total ~ mean_F_z + linf_z + k_z + age_maturity_z,
+  data = traj_traits, weights = 1 / pct_sd^2
 )
-summary(m_joint)
 
-car::vif(m_joint)
-```
+summary(fit)
 
-### Coefficient plot
+car::vif(fit)
 
-```{r}
-s_joint <- summary(m_joint)$coefficients
-ci_joint_all <- confint(m_joint)
+# Estimates
+s <- summary(fit)$coefficients
+ci <- confint(fit)
 
 coef_dat <- tibble(
-  term = rownames(s_joint)[-1],
-  estimate = s_joint[-1, "Estimate"],
-  conf.low = ci_joint_all[-1, 1],
-  conf.high = ci_joint_all[-1, 2],
-  p.value = s_joint[-1, "Pr(>|t|)"]
+  term = rownames(s)[-1],
+  estimate = s[-1, "Estimate"],
+  conf.low = ci[-1, 1],
+  conf.high = ci[-1, 2],
+  p.value = s[-1, "Pr(>|t|)"]
 ) |>
   mutate(
     term = recode(term,
@@ -532,61 +557,24 @@ ggplot(coef_dat, aes(x = estimate, y = reorder(term, estimate), xmin = conf.low,
   labs(x = "Estimate", y = NULL)
 
 ggsave(paste0(home, "/figures/supp/hgam_trait_cor_caterpillar.pdf"), width = 14, height = 8, units = "cm")
-```
 
-### Partial effect of each trait, holding the others fixed
+# Predictions
+g <- ggeffect(fit, "mean_F_z")
+s <- summary(fit)
+eq_label <- sprintf("italic(R)^2 == %.2f * ',' ~ italic(p) == %.3f",
+                    s$r.squared, coef(s)["mean_F_z", 4])
 
-```{r}
-# Partial residuals (resid(m_joint) + coef * predictor), not raw bivariate scatter.
-partial_dat <- traj_traits |>
-  mutate(
-    resid_joint = resid(m_joint),
-    partial_resid = resid_joint + s_joint["mean_F_z", "Estimate"] * mean_F_z
-  )
+plot(g, show_data = TRUE, alpha = 0.2, show_title = FALSE) +
+  theme_sleek() +
+  labs(x = "Mean F (z-scored)",
+       y = expression(paste("Percent change in ", B[0]))) +
+  annotate("text", x = Inf, y = Inf, label = eq_label, parse = TRUE,
+           hjust = 1.05, vjust = 1.3, size = 3)
 
-ci_joint <- confint(m_joint)["mean_F_z", ]
-t_meanF <- s_joint["mean_F_z", "t value"]
-partial_r2 <- t_meanF^2 / (t_meanF^2 + df.residual(m_joint))
+ggsave(paste0(home, "/figures/hgam_meanF_vs_trend.pdf"),
+       width = 19, height = 14, units = "cm")
 
-eq_label <- sprintf(
-  "beta = %.4f per SD of F (95%% CI %.4f, %.4f)\npartial R^2 = %.2f, p = %.3f",
-  s_joint["mean_F_z", "Estimate"], ci_joint[1], ci_joint[2],
-  partial_r2, s_joint["mean_F_z", "Pr(>|t|)"]
-)
-
-partial_line <- tibble(
-  mean_F = seq(min(traj_traits$mean_F), max(traj_traits$mean_F), length.out = 100)
-) |>
-  mutate(
-    mean_F_z = (mean_F - mean_F_ctr) / mean_F_sd,
-    linf_z = 0,
-    k_z = 0,
-    age_maturity_z = 0
-  )
-pred_line <- predict(m_joint, newdata = partial_line, se.fit = TRUE)
-partial_line$fit <- pred_line$fit
-partial_line$lwr <- pred_line$fit - 1.96 * pred_line$se.fit
-partial_line$upr <- pred_line$fit + 1.96 * pred_line$se.fit
-
-partial_dat |>
-  ggplot(aes(mean_F, partial_resid)) +
-  geom_hline(yintercept = 0, linetype = "dashed", color = "grey40", alpha = 0.6) +
-  geom_ribbon(data = partial_line, aes(x = mean_F, y = fit, ymin = lwr, ymax = upr), fill = "grey75", alpha = 0.3) +
-  geom_line(data = partial_line, aes(x = mean_F, y = fit), color = "tomato3", linewidth = 0.6) +
-  geom_point(aes(size = n_years), alpha = 0.6) +
-  annotate("text", x = Inf, y = Inf, label = eq_label, hjust = 1.05, vjust = 1.3, size = 3) +
-  scale_size(range = c(0.9, 5), breaks = c(20, 40, 60)) +
-  labs(
-    x = "Mean F",
-    y = expression(paste("Partial residual of ", B[0], " trend delta on mean F"), "(other traits held fixed)"),
-    size = "Sample size (years)"
-  ) +
-  guides(size = guide_legend(position = "inside")) +
-  theme(
-    legend.position.inside = c(0.85, 0.8)
-  )
-
-ggsave(paste0(home, "/figures/hgam_meanF_vs_trend.pdf"), width = 19, height = 14, units = "cm")
+#ggplot(traj_traits, aes(mean_F_z, pct_change_total)) + geom_point()
 ```
 
 ## SST tests
