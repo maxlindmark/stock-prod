@@ -258,6 +258,8 @@ V <- vcov(m_hgam, unconditional = TRUE) # coefficient covariance (includes smoot
 
 trend_list <- vector("list", nrow(traj_summary)) # one slot per stock, filled in the loop below
 
+set.seed(42) # fix the RNG so pct_change_total/pct_sd/pct_lwr/pct_upr are reproducible across re-knits
+
 for (i in seq_len(nrow(traj_summary))) { # one iteration per stock in traj_summary
   stock_id <- traj_summary$stock_f[i] # the stock this iteration is computing
 
@@ -345,7 +347,7 @@ tibble(
 
 ```{r}
 stock_order <- traj_summary |>
-  arrange(pct_change_total) |>
+  arrange(desc(pct_change_total)) |>
   pull(stock_f)
 
 # pct_lwr/pct_upr come directly from the coefficient-posterior simulation above,
@@ -379,23 +381,23 @@ pct_dat <- cater_dat |>
       TRUE ~ sprintf("No change: %d%%", pct)
     ),
     y_pos = case_when(
-      sig == "Positive sig." ~ 3,
+      sig == "Negative sig." ~ 3,
       sig == "No effect" ~ 4.5,
-      sig == "Negative sig." ~ 6
+      sig == "Positive sig." ~ 6
     )
   )
 
 ggplot(cater_dat, aes(y = stock_f, x = estimate, xmin = conf.low, xmax = conf.high, color = sig)) +
   geom_vline(xintercept = 0, color = "grey50", linetype = 2) +
-  geom_vline(xintercept = median_pct, color = "grey20", linetype = 3) +
+  geom_vline(xintercept = median_pct, color = "tomato", linetype = 3) +
   geom_errorbarh(height = 0) +
   geom_point(size = 1) +
   geom_text(
-    data = pct_dat, aes(x = Inf, y = y_pos, label = label, color = sig),
+    data = pct_dat, aes(x = Inf, y = Inf, vjust = y_pos, label = label, color = sig),
     inherit.aes = FALSE, hjust = 1.05, size = 3, show.legend = FALSE
   ) +
   annotate(
-    "text", x = Inf, y = 1.5, label = sprintf("Median change: %.0f%%", median_pct),
+    "text", x = Inf, y = Inf, vjust = 1.5, label = sprintf("Median change: %.0f%%", median_pct),
     hjust = 1.05, size = 3, color = "grey20"
   ) +
   scale_color_manual(values = c(
@@ -564,7 +566,21 @@ s <- summary(fit)
 eq_label <- sprintf("italic(R)^2 == %.2f * ',' ~ italic(p) == %.3f",
                     s$r.squared, coef(s)["mean_F_z", 4])
 
-plot(g, show_data = TRUE, alpha = 0.2, show_title = FALSE) +
+plot(g, show_residuals = TRUE)
+
+p_meanF <- plot(g, show_data = TRUE, alpha = 0.2, show_title = FALSE)
+
+# Each stock's own 95% CI on pct_change_total (from the simulation), drawn under the points/ribbon
+# so the plot visually communicates the same per-stock precision the regression weights on
+# (1 / pct_sd^2) -- wide segments are noisy, down-weighted stocks; short segments are precise ones.
+seg_layer <- geom_segment(
+  data = traj_traits,
+  aes(x = mean_F_z, xend = mean_F_z, y = pct_lwr, yend = pct_upr),
+  inherit.aes = FALSE, color = "grey40", alpha = 0.4, linewidth = 0.3
+)
+p_meanF$layers <- append(p_meanF$layers, list(seg_layer), after = 0)
+
+p_meanF +
   theme_sleek() +
   labs(x = "Mean F (z-scored)",
        y = expression(paste("Percent change in ", B[0]))) +
@@ -572,7 +588,7 @@ plot(g, show_data = TRUE, alpha = 0.2, show_title = FALSE) +
            hjust = 1.05, vjust = 1.3, size = 3)
 
 ggsave(paste0(home, "/figures/hgam_meanF_vs_trend.pdf"),
-       width = 19, height = 14, units = "cm")
+       width = 11, height = 11, units = "cm")
 
 #ggplot(traj_traits, aes(mean_F_z, pct_change_total)) + geom_point()
 ```
