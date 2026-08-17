@@ -173,7 +173,7 @@ n_draws <- 30
 nd_global <- distinct(nd, year, year_ct) |> mutate(stock_f = levels(d$stock_f)[1])
 
 Xp_global <- predict(m_hgam, newdata = nd_global, type = "lpmatrix", exclude = "s(year_ct,stock_f)")
-beta_draws <- MASS::mvrnorm(n_draws, coef(m_hgam), vcov(m_hgam))
+beta_draws <- mgcv::rmvn(n_draws, coef(m_hgam), vcov(m_hgam))
 draw_mat <- Xp_global %*% t(beta_draws)
 colnames(draw_mat) <- paste0("draw_", seq_len(n_draws))
 
