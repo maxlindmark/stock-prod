@@ -39,6 +39,7 @@ library(egg)
 library(ggrepel)
 library(RColorBrewer)
 library(ggeffects)
+library(tictoc)
 
 theme_set(theme_sleek())
 
@@ -58,7 +59,7 @@ d <- dat |>
   ) |>
   group_by(stock_f, species_f) |>
   arrange(year, .by_group = TRUE) |>
-  mutate(sst_lag1      = lag(sst, 1)) |>
+  mutate(sst_lag1 = lag(sst, 1)) |>
   ungroup() |>
   filter(year >= 1959) |>
   mutate(
@@ -81,6 +82,7 @@ d <- dat |>
 ## Fit hierarchical GAM
 
 ```{r}
+tic()
 m_hgam <- mgcv::gam(
   b0_sc ~ s(year_ct, k = 12, m = 2) +
     s(year_ct, stock_f, bs = "fs", k = 4, m = 1),
@@ -88,7 +90,7 @@ m_hgam <- mgcv::gam(
   family = scat(),
   method = "REML"
 )
-
+toc()
 saveRDS(m_hgam, paste0(home, "/output/m_hgam.rds"))
 
 summary(m_hgam)
@@ -245,11 +247,11 @@ traj_summary <- nd |>
   )
 
 # Approach below based on Wood 2017; 4.8.4 Bayesian confidence intervals for non-linear functions of parameters
-# Loop through each stock and take the prediction for 2019 and 1995. 
-# Get the uncertainty on the delta of those predictions by simulating 2000 draws of the model's coefficients from their approximate sampling distribution (Wood, 2017). 
+# Loop through each stock and take the prediction for 2019 and 1995.
+# Get the uncertainty on the delta of those predictions by simulating 2000 draws of the model's coefficients from their approximate sampling distribution (Wood, 2017).
 # Each draw givs a realisation of a simulated b0_sc at 1995 and 2019, which is then back-transformed to raw B0 using the stock's own mean and SD and converted to a percent change.
 # We take the median, SD and quantiles of the distribution of percentages
-# Draws where the simulated raw B0 falls at or below zero (biologically impossible but can happen here since the model's response variable is a z-scored variable) are also tracked. 
+# Draws where the simulated raw B0 falls at or below zero (biologically impossible but can happen here since the model's response variable is a z-scored variable) are also tracked.
 # Stocks lacking either boundary year are dropped below (n=1).
 
 nsim <- 2000 # posterior draws per stock
@@ -273,9 +275,9 @@ for (i in seq_len(nrow(traj_summary))) { # one iteration per stock in traj_summa
     )
     next
   }
-  
+
   # Ith stock's b0_mean/b0_sd, to back-transform b0_sc to raw b0
-  st <- b0_stats |> filter(stock_f == stock_id) 
+  st <- b0_stats |> filter(stock_f == stock_id)
 
   # Grab the design matrix for each year in nd pred
   Xp <- predict(m_hgam, newdata = sub, type = "lpmatrix")
@@ -285,13 +287,13 @@ for (i in seq_len(nrow(traj_summary))) { # one iteration per stock in traj_summa
   # Draw nsim (rows) random coefficient vectors from a MVN with covariance V
   B <- mgcv::rmvn(nsim, b, V)
   # Multiply realized simulated coefficient with the design matrix row and rescale back to b0!
-  early <- as.numeric(B %*% ce) * st$b0_sd + st$b0_mean 
-  late  <- as.numeric(B %*% cl) * st$b0_sd + st$b0_mean 
+  early <- as.numeric(B %*% ce) * st$b0_sd + st$b0_mean
+  late <- as.numeric(B %*% cl) * st$b0_sd + st$b0_mean
   # Percent change
   pct <- (late / early - 1) * 100
 
   trend_list[[i]] <- tibble(
-    stock_f = stock_id, 
+    stock_f = stock_id,
     pct_change_total = median(pct), # median change in percent across stocks
     pct_sd = sd(pct), # empirical SD of the simulated % change (used as a precision weight downstream)
     pct_lwr = unname(quantile(pct, 0.025)), # 2.5th percentile of simulated % change
@@ -397,7 +399,8 @@ ggplot(cater_dat, aes(y = stock_f, x = estimate, xmin = conf.low, xmax = conf.hi
     inherit.aes = FALSE, hjust = 1.05, size = 3, show.legend = FALSE
   ) +
   annotate(
-    "text", x = Inf, y = Inf, vjust = 1.5, label = sprintf("Median change: %.0f%%", median_pct),
+    "text",
+    x = Inf, y = Inf, vjust = 1.5, label = sprintf("Median change: %.0f%%", median_pct),
     hjust = 1.05, size = 3, color = "grey20"
   ) +
   scale_color_manual(values = c(
@@ -506,25 +509,26 @@ ggsave(paste0(home, "/figures/supp/hgam_trend_by_habitat.pdf"), width = 18, heig
 ### Weighted multiple regression
 
 ```{r}
-mean_F_ctr <- mean(traj_traits$mean_F)
-mean_F_sd <- sd(traj_traits$mean_F)
-linf_ctr <- mean(traj_traits$linf)
-linf_sd <- sd(traj_traits$linf)
-k_ctr <- mean(traj_traits$k)
-k_sd <- sd(traj_traits$k)
-age_ctr <- mean(traj_traits$age_maturity)
-age_sd <- sd(traj_traits$age_maturity)
+# Load ABI
+abi <- read_csv(paste0(here::here(), "/output/ts_abi.csv")) |>
+  rename(stock_f = .id) |>
+  filter(ABImsy > 0) |>
+  summarise(abi_slope = coef(lm(log(ABImsy) ~ year))[["year"]], .by = "stock_f")
+
+traj_traits <- traj_traits |>
+  left_join(abi, by = "stock_f")
 
 traj_traits <- traj_traits |>
   mutate(
-    mean_F_z = (mean_F - mean_F_ctr) / mean_F_sd,
-    linf_z = (linf - linf_ctr) / linf_sd,
-    k_z = (k - k_ctr) / k_sd,
-    age_maturity_z = (age_maturity - age_ctr) / age_sd
+    mean_F_sc = as.numeric(scale(mean_F)),
+    linf_sc = as.numeric(scale(linf)),
+    k_sc = as.numeric(scale(k)),
+    age_maturity_sc = as.numeric(scale(age_maturity)),
+    abi_slope_sc = as.numeric(scale(abi_slope))
   )
 
 fit <- lm(
-  pct_change_total ~ mean_F_z + linf_z + k_z + age_maturity_z,
+  pct_change_total ~ mean_F_sc + linf_sc + k_sc + age_maturity_sc + abi_slope_sc,
   data = traj_traits, weights = 1 / pct_sd^2
 )
 
@@ -545,8 +549,11 @@ coef_dat <- tibble(
 ) |>
   mutate(
     term = recode(term,
-      "mean_F_z" = "Mean F", "linf_z" = "Linf",
-      "k_z" = "von Bertalanffy k", "age_maturity_z" = "Age at maturity"
+      "mean_F_sc" = "Mean~F",
+      "linf_sc" = "L[infinity]",
+      "abi_slope_sc" = "ABI",
+      "k_sc" = "von~Bertalanffy~k",
+      "age_maturity_sc" = "Age~at~maturity"
     ),
     sig = ifelse(p.value < 0.05, "Sig.", "No effect")
   )
@@ -555,16 +562,19 @@ ggplot(coef_dat, aes(x = estimate, y = reorder(term, estimate), xmin = conf.low,
   geom_vline(xintercept = 0, linetype = "dashed", color = "grey50") +
   geom_pointrange(size = 0.5, linewidth = 0.6) +
   scale_color_manual(values = c("Sig." = "steelblue", "No effect" = "grey60")) +
+  scale_y_discrete(labels = function(x) parse(text = x)) +
   guides(color = "none") +
   labs(x = "Estimate", y = NULL)
 
 ggsave(paste0(home, "/figures/supp/hgam_trait_cor_caterpillar.pdf"), width = 14, height = 8, units = "cm")
 
 # Predictions
-g <- ggeffect(fit, "mean_F_z")
+g <- ggeffect(fit, "mean_F_sc")
 s <- summary(fit)
-eq_label <- sprintf("italic(R)^2 == %.2f * ',' ~ italic(p) == %.3f",
-                    s$r.squared, coef(s)["mean_F_z", 4])
+eq_label <- sprintf(
+  "italic(R)^2 == %.2f * ',' ~ italic(p) == %.3f",
+  s$r.squared, coef(s)["mean_F_sc", 4]
+)
 
 plot(g, show_residuals = TRUE)
 
@@ -575,22 +585,27 @@ p_meanF <- plot(g, show_data = TRUE, alpha = 0.2, show_title = FALSE)
 # (1 / pct_sd^2) -- wide segments are noisy, down-weighted stocks; short segments are precise ones.
 seg_layer <- geom_segment(
   data = traj_traits,
-  aes(x = mean_F_z, xend = mean_F_z, y = pct_lwr, yend = pct_upr),
+  aes(x = mean_F_sc, xend = mean_F_sc, y = pct_lwr, yend = pct_upr),
   inherit.aes = FALSE, color = "grey40", alpha = 0.4, linewidth = 0.3
 )
 p_meanF$layers <- append(p_meanF$layers, list(seg_layer), after = 0)
 
 p_meanF +
   theme_sleek() +
-  labs(x = "Mean F (z-scored)",
-       y = expression(paste("Percent change in ", B[0]))) +
-  annotate("text", x = Inf, y = Inf, label = eq_label, parse = TRUE,
-           hjust = 1.05, vjust = 1.3, size = 3)
+  labs(
+    x = "Mean F (z-scored)",
+    y = expression(paste("Percent change in ", B[0]))
+  ) +
+  annotate("text",
+    x = Inf, y = Inf, label = eq_label, parse = TRUE,
+    hjust = 1.05, vjust = 1.3, size = 3
+  )
 
 ggsave(paste0(home, "/figures/hgam_meanF_vs_trend.pdf"),
-       width = 11, height = 11, units = "cm")
+  width = 11, height = 11, units = "cm"
+)
 
-#ggplot(traj_traits, aes(mean_F_z, pct_change_total)) + geom_point()
+# ggplot(traj_traits, aes(mean_F_z, pct_change_total)) + geom_point()
 ```
 
 ## SST tests
