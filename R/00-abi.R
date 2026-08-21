@@ -18,7 +18,7 @@ cl <- makeCluster(ncores)
 registerDoParallel(cl)
 
 ## Estimating a Beverton and Holt for all stocks
-bh1 <- foreach(id = ids, .packages = c("FLCore", "FLBRP")) %dopar% {
+bh1 <- foreach(id = ids, .packages = c("FLCore", "FLBRP", "icesdata")) %dopar% {
   landings.n(icesdata[[id]]) <- catch.n(icesdata[[id]])
   landings.wt(icesdata[[id]]) <- catch.wt(icesdata[[id]])
   discards.n(icesdata[[id]])[] <- 0
