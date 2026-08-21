@@ -154,6 +154,9 @@ colorize_tv_group <- function(x) {
     return(x)
   }
   parts <- strsplit(x, " \\+ ")[[1]]
+  if (x == "Wt + Mat + M") {
+    parts <- c("Wt", "M", "Mat")
+  }
   paste(
     paste0("<span style='color:", abbrev_cols[parts], "'>", parts, "</span>"),
     collapse = " + "
