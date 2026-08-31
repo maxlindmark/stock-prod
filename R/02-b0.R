@@ -108,3 +108,7 @@ B0 <- transmute(B0, sid = sid, year = year, B0 = B0.relative)
 B0 <- merge(B0, species_lookup, by = "sid")
 saveRDS(B0, file = paste0(home, "/output/b0.rds"))
 
+# 3 stocks are dropped because eqsim() couldn't produce a usable virgin-recruitment (R0) estimate for them — missing entirely for anf.27.3a46, and NA for cod.27.24-32 and her.27.6a7bc — and R0 is required to set up the stock-recruit model.
+
+
+

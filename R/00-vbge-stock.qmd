@@ -1,0 +1,489 @@
+---
+title: "Stock-specific von Bertalanffy growth parameters from survey length-at-age data"
+author: "Max Lindmark"
+date: today
+date-format: iso
+toc: true
+format:
+  html:
+    page-layout: full
+    embed-resources: true
+knitr:
+  opts_chunk:
+    fig.align: center
+    out-width: 100%
+editor: source
+---
+
+## Background
+
+The VBGE parameters ($L_\infty$, $K$) used in `04-glmm-hgam.qmd` come from FishLife
+(`icesdata`'s `fishlife` attribute), which is resolved at the *species* level, not the
+*stock* level -- every stock of e.g. `Gadus morhua` gets the same $L_\infty$/$K$
+regardless of which stock it actually is.
+
+Here we instead fit a standard VBGE per *stock*, using survey length-at-age data from
+`wggrafy-data` project (`north-east-atlantic-datras` region), restricted to the ICES
+subdivisions each stock occupies.
+
+## Load libraries
+
+```{r}
+#| warning: false
+#| message: false
+
+library(dplyr)
+library(tidyr)
+library(readr)
+library(purrr)
+library(tibble)
+library(ggplot2)
+library(RTMB)
+library(raster)
+library(sp)
+library(icesdata)
+library(ggsidekick)
+library(tictoc)
+
+theme_set(theme_sleek())
+
+home <- here::here()
+
+# wggrafy-data is a sibling project (not part of this repo)
+wggrafy_home <- paste0(dirname(home), "/wggrafy-data")
+```
+
+## Stocks going into script 04, and their current (species-level) VBGE parameters
+
+```{r}
+#| warning: false
+#| message: false
+
+dat <- read_csv(paste0(home, "/output/dat.csv"), show_col_types = FALSE)
+
+stock_species <- dat |> distinct(stock, species = Species)
+stocks <- stock_species$stock
+
+n_distinct(stocks)
+
+# Current approach (as in 04-glmm-hgam.qmd): FishLife linf/k, resolved per stock name
+# in icesdata but only varying by species (duplicated across stocks of the same species)
+current_vbge <- names(icesdata) |>
+  map(function(stock_name) {
+    stk <- icesdata[[stock_name]]
+    fl <- attributes(stk)$fishlife
+    if (is.null(fl)) {
+      return(NULL)
+    }
+    tibble(stock = stock_name, linf_current = unname(fl["linf"]), k_current = unname(fl["k"]))
+  }) |>
+  list_rbind() |>
+  filter(stock %in% stocks)
+
+current_vbge
+```
+
+## Map each stock to its ICES subdivisions
+
+Same key + manual patches as `03-join-env-flr.R`.
+
+```{r}
+#| warning: false
+#| message: false
+
+key <- read_csv(paste0(home, "/data/stocks_per_area2025.csv"), show_col_types = FALSE) |>
+  mutate(sub_div = sub("^27\\.", "", ICES_Area)) |>
+  mutate(
+    StockKeyLabel = ifelse(StockKeyLabel == "cod.21.1.isc", "cod.21.1", StockKeyLabel),
+    StockKeyLabel = ifelse(StockKeyLabel == "cod.27.1-2.coastN", "cod.27.1-2coastN", StockKeyLabel)
+  ) |>
+  mutate(sub_div = ifelse(StockKeyLabel %in% c("cod.21.1", "cod.27.1-2coastN"), "1.b", sub_div)) |>
+  filter(StockKeyLabel %in% stocks)
+
+stopifnot(all(stocks %in% key$StockKeyLabel))
+```
+
+## Read survey length-at-age data and assign ICES subdivisions
+
+```{r}
+#| warning: false
+#| message: false
+
+tic()
+len <- readRDS(paste0(wggrafy_home, "/outputs/length_all.rds")) |>
+  filter(!is.na(lngt_cm), !is.na(age), !is.na(lon), !is.na(lat))
+toc()
+
+# sp/over on unique coordinates only (much faster than per-row), same approach as
+# the ICES sub-division join in 01-sal-sst.R
+shape <- shapefile(paste0(home, "/data/shapefiles/StatRec_map_Areas_Full_20170124.shp"))
+
+uniq_coords <- len |> distinct(lon, lat)
+pts <- SpatialPoints(cbind(uniq_coords$lon, uniq_coords$lat), proj4string = CRS(proj4string(shape)))
+uniq_coords$sub_div <- over(pts, shape)$Area_27
+
+len <- len |>
+  left_join(uniq_coords, by = c("lon", "lat")) |>
+  filter(!is.na(sub_div))
+```
+
+## Filter length-at-age data per stock, track coverage, bind rows
+
+For each stock: filter survey data to its species and its ICES subdivisions (from
+`key`), then record how many of the stock's subdivisions actually have survey data, and
+how the survey year range compares to the year range of the `b0` data used in script 04.
+
+```{r}
+#| warning: false
+#| message: false
+
+b0 <- readRDS(paste0(home, "/output/b0.rds"))
+b0_yr <- b0 |>
+  summarise(b0_yr_min = min(year), b0_yr_max = max(year), .by = sid)
+
+coverage_list <- vector("list", length(stocks))
+laa_list <- vector("list", length(stocks))
+
+for (i in seq_along(stocks)) {
+  s <- stocks[i]
+  sp_name <- stock_species$species[stock_species$stock == s]
+  key_sub <- key |> filter(StockKeyLabel == s)
+
+  laa <- len |> filter(species == sp_name, sub_div %in% key_sub$sub_div)
+
+  b0r <- b0_yr |> filter(sid == s)
+
+  coverage_list[[i]] <- tibble(
+    stock = s,
+    species = sp_name,
+    n_subdiv_total = n_distinct(key_sub$sub_div),
+    n_subdiv_with_data = n_distinct(laa$sub_div),
+    n_rows = nrow(laa),
+    n_ages = n_distinct(laa$age),
+    laa_yr_min = suppressWarnings(min(laa$year)),
+    laa_yr_max = suppressWarnings(max(laa$year)),
+    b0_yr_min = b0r$b0_yr_min,
+    b0_yr_max = b0r$b0_yr_max
+  )
+
+  if (nrow(laa) > 0) laa_list[[i]] <- laa |> mutate(stock = s)
+}
+
+coverage <- bind_rows(coverage_list) |>
+  mutate(
+    # descriptive only, survey data is NOT filtered to the b0 year range
+    laa_covers_b0_range = laa_yr_min <= b0_yr_min & laa_yr_max >= b0_yr_max
+  )
+
+laa_all <- bind_rows(laa_list)
+
+write_csv(coverage, paste0(home, "/output/vbge_stock_coverage.csv"))
+
+coverage |> arrange(n_rows) |> print(n = 100)
+
+cat(
+  "Stocks with zero survey rows:", sum(coverage$n_rows == 0), "of", nrow(coverage), "\n",
+  "Stocks with data in every one of their subdivisions:",
+  sum(coverage$n_subdiv_with_data == coverage$n_subdiv_total), "\n"
+)
+```
+
+## Coverage plots
+
+Two overlapping, semi-transparent bars per stock: a background bar (grey) for the full
+extent the stock is defined over, and a foreground bar (blue) for what's actually covered
+by survey data. Where they match exactly, the blue bar fully covers the grey one and it
+reads as a single solid bar; any grey showing past the blue is the shortfall.
+
+```{r}
+#| warning: false
+#| message: false
+
+stock_order <- stock_species |> arrange(species, stock) |> pull(stock)
+
+subdiv_cov_dat <- coverage |>
+  transmute(stock, `Subdivisions in stock definition` = n_subdiv_total, `Subdivisions with survey data` = n_subdiv_with_data) |>
+  pivot_longer(-stock, names_to = "type", values_to = "n") |>
+  mutate(stock = factor(stock, levels = stock_order))
+
+ggplot(subdiv_cov_dat, aes(y = stock, x = n, fill = type)) +
+  geom_col(position = "identity", alpha = 0.55, width = 0.7) +
+  scale_fill_manual(values = c(
+    "Subdivisions in stock definition" = "grey40",
+    "Subdivisions with survey data"    = "steelblue"
+  )) +
+  labs(x = "Number of ICES subdivisions", y = NULL, fill = NULL) +
+  theme(legend.position = "bottom", axis.text.y = element_text(size = 6))
+
+ggsave(paste0(home, "/figures/supp/vbge_coverage_subdivisions.pdf"), width = 14, height = 26, units = "cm")
+
+year_cov_dat <- coverage |>
+  filter(n_rows > 0) |> # laa_yr_min/max are +-Inf when a stock has zero survey rows
+  transmute(stock, species, b0_yr_min, b0_yr_max, laa_yr_min, laa_yr_max) |>
+  pivot_longer(-c(stock, species), names_to = c("type", ".value"), names_pattern = "(.*)_yr_(min|max)") |>
+  mutate(
+    type = recode(type, b0 = "B0 data years", laa = "Survey (length-at-age) years"),
+    stock = factor(stock, levels = stock_order)
+  )
+
+ggplot(year_cov_dat, aes(y = stock, color = type)) +
+  geom_segment(aes(x = min, xend = max, yend = stock), linewidth = 3, alpha = 0.55) +
+  scale_color_manual(values = c(
+    "B0 data years"                 = "grey40",
+    "Survey (length-at-age) years"  = "steelblue"
+  )) +
+  labs(x = "Year", y = NULL, color = NULL) +
+  theme(legend.position = "bottom", axis.text.y = element_text(size = 6))
+
+ggsave(paste0(home, "/figures/supp/vbge_coverage_years.pdf"), width = 14, height = 26, units = "cm")
+```
+
+## Fit stock-specific VBGE with RTMB
+
+Standard (non-omega, non-spatial, non-time-varying) VBGE:
+
+$$\hat{l}_i = L_\infty \left(1 - e^{-K(a_i - t_0)}\right), \quad \log(l_i) \sim \text{Normal}(\log(\hat{l}_i), \sigma^2)$$
+
+fit independently per stock. Stocks with too little data to identify three growth
+parameters are skipped.
+
+```{r}
+#| warning: false
+#| message: false
+
+min_n_rows <- 30
+min_n_ages <- 3
+
+fit_vbge <- function(age, length) {
+  tmb_data <- list(age = age, length = length)
+
+  par <- list(
+    log_Linf  = log(max(length) * 1.1),
+    log_K     = log(0.2),
+    # t0 starts < 0 so pred > 0 at age 0 (pred = 0 at age = t0, which gives -Inf
+    # log-likelihood and breaks the optimizer if t0 starts at/above the min observed age)
+    t0        = -0.5,
+    log_sigma = log(0.2)
+  )
+
+  lower <- c(log_Linf = log(max(length) * 0.5), log_K = log(0.01), t0 = -10, log_sigma = log(0.01))
+  upper <- c(log_Linf = log(max(length) * 3),   log_K = log(2),    t0 = 5,   log_sigma = log(5))
+
+  nll <- function(par) {
+    getAll(par, tmb_data)
+
+    Linf  <- exp(log_Linf)
+    K     <- exp(log_K)
+    sigma <- exp(log_sigma)
+
+    pred <- Linf * (1 - exp(-K * (age - t0)))
+
+    log(length) %~% dnorm(log(pred), sigma)
+
+    ADREPORT(Linf)
+    ADREPORT(K)
+  }
+
+  obj <- MakeADFun(nll, par, silent = TRUE)
+  opt <- tryCatch(nlminb(obj$par, obj$fn, obj$gr, lower = lower, upper = upper), error = function(e) NULL)
+  if (is.null(opt) || opt$convergence != 0) {
+    return(list(status = "opt_fail", estimates = NULL))
+  }
+
+  tol <- 0.02 * (upper - lower)
+  at_bound <- (upper["log_Linf"] - opt$par["log_Linf"]) < tol["log_Linf"] ||
+    (opt$par["log_K"] - lower["log_K"]) < tol["log_K"]
+  if (at_bound) {
+    return(list(status = "boundary", estimates = NULL))
+  }
+
+  sdr <- tryCatch(sdreport(obj), error = function(e) NULL)
+  if (is.null(sdr) || !sdr$pdHess) {
+    return(list(status = "no_hess", estimates = NULL))
+  }
+
+  s <- summary(sdr, "report")
+  list(
+    status = "ok",
+    estimates = tibble(
+      parameter = rownames(s),
+      estimate  = s[, "Estimate"],
+      se        = s[, "Std. Error"]
+    )
+  )
+}
+
+fit_stocks <- coverage |>
+  filter(n_rows >= min_n_rows, n_ages >= min_n_ages) |>
+  pull(stock)
+
+length(fit_stocks)
+
+tic()
+vbge_fits_list <- vector("list", length(fit_stocks))
+fit_status_list <- vector("list", length(fit_stocks))
+
+for (i in seq_along(fit_stocks)) {
+  s <- fit_stocks[i]
+  sub <- laa_all |> filter(stock == s)
+
+  fit <- fit_vbge(age = sub$age, length = sub$lngt_cm)
+
+  fit_status_list[[i]] <- tibble(stock = s, fit_status = fit$status)
+
+  if (!is.null(fit$estimates)) {
+    vbge_fits_list[[i]] <- fit$estimates |> mutate(stock = s)
+  }
+}
+toc()
+
+vbge_fits <- bind_rows(vbge_fits_list)
+fit_status <- bind_rows(fit_status_list)
+
+fit_status |> count(fit_status)
+```
+
+## Plausibility check: drop implausible Linf estimates
+
+The bound check above only catches fits that ran all the way to the box constraint. A
+generous bound (3x the stock's own max observed length) leaves room for some fits to
+settle on the same Linf -> Inf, K -> 0 identifiability ridge at a point that's *locally*
+well-conditioned (converges, passes pdHess) but still biologically implausible -- e.g.
+`cod.27.6a` at Linf = 209 cm, `pok.27.3a46` at 197 cm.
+
+FishLife's species-level Linf is an independent, literature-based sanity check. Comparing
+`Linf_new / Linf_species` across all "ok" fits shows most stocks sit close to their
+species value (IQR 0.83-1.16), then a clean gap, then a small cluster from 1.55 up to
+2.33 -- those are the same identifiability-ridge fits (paired with an implausibly small
+K), so anything above that gap is dropped back to the species-level fallback.
+
+```{r}
+#| warning: false
+#| message: false
+
+plausibility_ratio_max <- 1.5
+
+linf_ratio_check <- vbge_fits |>
+  filter(parameter == "Linf") |>
+  transmute(stock, linf_new = estimate) |>
+  left_join(current_vbge, by = "stock") |>
+  mutate(linf_ratio = linf_new / linf_current) |>
+  arrange(desc(linf_ratio))
+
+linf_ratio_check |> print(n = 60)
+
+implausible_stocks <- linf_ratio_check |>
+  filter(linf_ratio > plausibility_ratio_max) |>
+  pull(stock)
+
+cat(
+  "Dropped as implausible (Linf >", plausibility_ratio_max, "x species-level Linf):\n ",
+  paste(implausible_stocks, collapse = ", "), "\n"
+)
+
+vbge_fits <- vbge_fits |> filter(!(stock %in% implausible_stocks))
+fit_status <- fit_status |>
+  mutate(fit_status = ifelse(stock %in% implausible_stocks, "implausible_linf", fit_status))
+
+saveRDS(vbge_fits, paste0(home, "/output/vbge_stock_fits.rds"))
+write_csv(fit_status, paste0(home, "/output/vbge_stock_fit_status.csv"))
+
+fit_status |> count(fit_status)
+
+cat(
+  "Usable stock-specific VBGE fits:", sum(fit_status$fit_status == "ok"),
+  "of", length(fit_stocks), "attempted stocks\n",
+  "(the rest either hit the identifiability ridge -- long-lived species sampled almost",
+  "entirely as juveniles -- or were dropped by the plausibility check above; both fall",
+  "back to the species-level value in the final dataset below)\n"
+)
+```
+
+## Caterpillar plot: current (species-level) vs. stock-specific VBGE parameters
+
+```{r}
+#| warning: false
+#| message: false
+
+new_vbge <- vbge_fits |>
+  mutate(
+    conf.low  = estimate - 1.96 * se,
+    conf.high = estimate + 1.96 * se
+  ) |>
+  dplyr::select(stock, parameter, estimate, conf.low, conf.high) |>
+  mutate(source = "Stock-specific (survey)")
+
+current_long <- current_vbge |>
+  pivot_longer(c(linf_current, k_current), names_to = "parameter", values_to = "estimate") |>
+  mutate(
+    parameter = ifelse(parameter == "linf_current", "Linf", "K"),
+    conf.low = NA_real_,
+    conf.high = NA_real_,
+    source = "Current (species-level)"
+  )
+
+cater_dat <- bind_rows(current_long, new_vbge) |>
+  left_join(stock_species, by = "stock") |>
+  mutate(
+    parameter = factor(parameter, levels = c("Linf", "K"), labels = c("L[infinity]", "K")),
+    stock = factor(stock, levels = stock_species |> arrange(species, stock) |> pull(stock))
+  )
+
+n_stocks_plot <- n_distinct(cater_dat$stock)
+
+ggplot(cater_dat, aes(y = stock, x = estimate, color = source)) +
+  geom_point(size = 1.4, alpha = 0.85) +
+  geom_errorbarh(
+    data = cater_dat |> filter(source == "Stock-specific (survey)"),
+    aes(xmin = conf.low, xmax = conf.high),
+    height = 0, alpha = 0.85
+  ) +
+  facet_wrap(~parameter, scales = "free_x", labeller = label_parsed) +
+  scale_color_manual(values = c(
+    "Current (species-level)" = "grey50",
+    "Stock-specific (survey)" = "steelblue"
+  )) +
+  labs(x = NULL, y = NULL, color = NULL) +
+  theme(
+    legend.position = "bottom",
+    axis.text.y = element_text(size = 6)
+  )
+
+# ggsave(paste0(home, "/figures/vbge_stock_vs_species_caterpillar.pdf"),
+#   width = 18, height = 26, units = "cm"
+# )
+```
+
+## Final VBGE parameter set for script 04
+
+One row per stock: the stock-specific (survey) estimate where the fit was identifiable
+(`fit_status == "ok"`), falling back to the current species-level FishLife value
+otherwise.
+
+```{r}
+#| warning: false
+#| message: false
+
+new_wide <- vbge_fits |>
+  dplyr::select(stock, parameter, estimate) |>
+  pivot_wider(names_from = parameter, values_from = estimate) |>
+  rename(linf_new = Linf, k_new = K)
+
+vbge_final <- stock_species |>
+  left_join(current_vbge, by = "stock") |>
+  left_join(new_wide, by = "stock") |>
+  mutate(
+    source = ifelse(!is.na(linf_new) & !is.na(k_new), "stock-specific (survey)", "current (species-level)"),
+    Linf = ifelse(!is.na(linf_new), linf_new, linf_current),
+    K = ifelse(!is.na(k_new), k_new, k_current)
+  ) |>
+  dplyr::select(stock, species, Linf, K, source)
+
+stopifnot(all(!is.na(vbge_final$Linf)), all(!is.na(vbge_final$K)))
+
+vbge_final |> count(source)
+
+saveRDS(vbge_final, paste0(home, "/output/vbge_final.rds"))
+
+vbge_final
+```

@@ -392,7 +392,7 @@ pct_dat <- cater_dat |>
 ggplot(cater_dat, aes(y = stock_f, x = estimate, xmin = conf.low, xmax = conf.high, color = sig)) +
   geom_vline(xintercept = 0, color = "grey50", linetype = 2) +
   geom_vline(xintercept = median_pct, color = "tomato", linetype = 3) +
-  geom_errorbarh(height = 0) +
+  geom_errorbar(width = 0) +
   geom_point(size = 1) +
   geom_text(
     data = pct_dat, aes(x = Inf, y = Inf, vjust = y_pos, label = label, color = sig),
@@ -421,21 +421,67 @@ ggsave(paste0(home, "/figures/hgam_trend_since_1995_caterpillar.pdf"), width = 1
 ### Add life history traits, taxonomy and habitat variables
 
 ```{r}
-# Life-history traits + species, from icesdata's fishlife attribute
+# Species identity + age at maturity, from icesdata
 traits <- names(icesdata) |>
   map(function(stock_name) {
     stk <- icesdata[[stock_name]]
-    fl <- attributes(stk)$fishlife
-    if (is.null(fl)) {
-      return(NULL)
-    }
     tibble(
       stock_f = stock_name, species = attributes(stk)$species,
-      linf = unname(fl["linf"]), k = unname(fl["k"]),
       age_maturity = mean(as.numeric(mat50(stk)), na.rm = TRUE)
     )
   }) |>
   list_rbind()
+
+# VBGE parameters (Linf, K), from 00-vbge-stock.qmd: stock-specific RTMB fit to survey
+# length-at-age data where identifiable, falling back to FishLife's species-level value
+# otherwise (see output/vbge_final.rds for the per-stock fit status/source).
+vbge <- readRDS(paste0(home, "/output/vbge_final.rds")) |>
+  rename(stock_f = stock, linf = Linf, k = K, vbge_source = source)
+
+# Species-level mean (across other stocks of the same species already in vbge_final) as a
+# defensive fallback for any stock missing from vbge_final entirely (e.g. added to dat.csv
+# without re-running 00-vbge-stock.qmd) -- not expected to trigger for the current stock set.
+vbge_species_avg <- vbge |>
+  summarise(linf_avg = mean(linf, na.rm = TRUE), k_avg = mean(k, na.rm = TRUE), .by = species)
+
+traits <- traits |>
+  left_join(vbge |> select(stock_f, linf, k, vbge_source), by = "stock_f") |>
+  left_join(vbge_species_avg, by = "species") |>
+  mutate(
+    vbge_source = ifelse(is.na(vbge_source) & !is.na(linf_avg), "species average (fallback)", vbge_source),
+    linf = coalesce(linf, linf_avg),
+    k = coalesce(k, k_avg)
+  ) |>
+  select(-linf_avg, -k_avg)
+
+# Length at 50% maturity (L50), from data/l50_clean.rds (logistic maturity-ogive fits to
+# survey data): stock-specific estimate where available, falling back to the species-level
+# (pooled across stocks) estimate, and calculated from age at 50% maturity (age_maturity, 
+# from icesdata's mat50() above) via each stock's own VBGE parameters (inverse VBGE, t0 = 0;
+# t0 isn't estimated/stored anywhere in this pipeline).
+l50_dat <- readRDS(paste0(home, "/data/l50_clean.rds")) |> ungroup()
+
+l50_stock <- l50_dat |>
+  filter(model == "Stock", sex == "Combined", is.na(period), is.na(ices_area)) |>
+  transmute(species_stock, l50_stock = l50_est)
+
+l50_species <- l50_dat |>
+  filter(model == "Global", sex == "Combined", is.na(period)) |>
+  transmute(species_clean, l50_species = l50_est)
+
+traits <- traits |>
+  mutate(
+    species_clean = gsub(" ", "_", species),
+    species_stock = paste0(species_clean, "_", stock_f)
+  ) |>
+  left_join(l50_stock, by = "species_stock") |>
+  left_join(l50_species, by = "species_clean") |>
+  mutate(
+    l50_from_vbge = linf * (1 - exp(-k * age_maturity)),
+    l50 = coalesce(l50_stock, l50_species, l50_from_vbge),
+    l50_source = ifelse(!is.na(l50_stock) | !is.na(l50_species), "l50", "from icesdata a50")
+  ) |>
+  select(-species_clean, -species_stock, -l50_stock, -l50_species, -l50_from_vbge)
 
 # WoRMS species-to-family lookup from the stomachr package, plus a manual patch for species missing from that lookup (data from stomachr package)
 load("/Users/maxlindmark/Dropbox/max-work/R/stomachr/data/worms_lookup.rda")
@@ -447,7 +493,10 @@ fam_manual <- tibble(
   ),
   family = c("Lophiidae", "Moronidae", "Scophthalmidae", "Clupeidae", "Sebastidae", "Sebastidae", "Lotidae")
 )
-fam_lookup <- bind_rows(fam_lookup, fam_manual)
+fam_lookup <- bind_rows(fam_lookup, fam_manual) |>
+  # Brosme brosme is already in worms_lookup (same family), so the manual patch duplicates
+  # it -- dedupe here, else the downstream species join fans stock rows out (many-to-many).
+  distinct(scientific_name, .keep_all = TRUE)
 
 # Demersal/pelagic/benthic habitat guild from FishBase
 species_list <- unique(traits$species)
@@ -488,6 +537,18 @@ traj_traits <- traj_summary |>
   )
 
 saveRDS(traj_traits, paste0(home, "/output/traj_traits.rds"))
+```
+
+### VBGE and L50 parameter sources
+
+```{r}
+# Table of vbge and l50 parameter source for each stock
+param_source_table <- traits |>
+  semi_join(distinct(d, stock_f), by = "stock_f") |>
+  select(stock_f, species, vbge_source, l50_source) |>
+  arrange(species, stock_f)
+
+param_source_table |> as.data.frame()
 ```
 
 ### Trend by habitat guild
@@ -741,7 +802,7 @@ p1 <- ggplot(sst_slopes, aes(y = stock_f, x = estimate, xmin = conf.low, xmax = 
   ) +
   geom_vline(data = fixed_sst, aes(xintercept = estimate), linetype = "dashed", color = "grey40") +
   geom_vline(xintercept = 0, color = "grey50") +
-  geom_errorbarh(height = 0) +
+  geom_errorbar(width = 0) +
   geom_point(size = 1) +
   scale_color_manual(values = c(
     "Positive sig." = "tomato",
@@ -790,7 +851,7 @@ sst_reg_by_stock |> count(sig)
 
 ggplot(sst_reg_by_stock, aes(y = reorder(stock_f, estimate), x = estimate, xmin = conf.low, xmax = conf.high, color = sig)) +
   geom_vline(xintercept = 0, color = "grey50") +
-  geom_errorbarh(height = 0) +
+  geom_errorbar(width = 0) +
   geom_point(size = 1.5) +
   scale_color_manual(values = c(
     "Positive sig." = "tomato",
