@@ -9,8 +9,7 @@ B0 <- readRDS(paste0(home, "/output/b0.rds"))
 ggplot(B0, aes(year, B0)) +
   geom_line(color = "grey30") +
   facet_wrap(~sid, scales = "free_y", ncol = 6) +
-  labs(x = "Year", y = expression(paste("Relative ", B[0]))) +
-  geom_hline(yintercept = 1, color = "red", alpha = 0.4, lty = 2) +
+  labs(x = "Year", y = expression(B[0])) +
   scale_x_continuous(breaks = c(1980, 2020)) +
   theme(
     strip.text.x.top = element_text(size = 7),

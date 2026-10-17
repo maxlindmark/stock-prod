@@ -59,18 +59,6 @@ bhs <- FLSRs(bhs[!laply(bhs, is.null)])
 # ML: them without re-fitting ~80 Beverton-Holt models via TMB.
 saveRDS(list(icesdata = icesdata, bhs = bhs), file = paste0(home, "/output/srr_fits.rds"))
 
-# ML: FLBRP combines the stock biology with the fitted SR to compute equilibrium
-# ML: reference points. brp() solves for FMSY, virgin SSB (B0), and SSB at MSY.
-eqs <- llply(names(icesdata), function(id) {
-  print(id)
-  tryIt(brp(FLBRP(icesdata[[id]], bhs[[id]], nyears = dim(icesdata[[id]])[2])))
-})
-names(eqs) <- nms
-eqs <- FLBRPs(eqs[!laply(eqs, is.null)])
-
-# ML: Extract virgin SSB (unfished equilibrium) and SSB at MSY as scalar reference points.
-refs <- ldply(eqs, function(x) refpts(x)[c("virgin", "msy"), "ssb", drop = TRUE], .id = "sid")
-
 # ML: b0dyn() projects the stock forward with F = 0 using the time-varying biological
 # ML: parameters (wt, mat, M) and the fitted SR model. The result is the SSB the stock
 # ML: would have had each year if it had never been fished ("dynamic B0").
@@ -89,11 +77,6 @@ dat <- mdply(names(bhs), function(id) {
 })
 
 dat <- cast(dat, year + sid ~ qname, value = "data")
-dat <- merge(dat, refs)
-
-# ML: B0.relative = dynamic B0 / virgin SSB: how much of the original unfished
-# ML: potential remains, accounting for changes in growth, maturity, and M over time.
-B0 <- transmute(dat, sid = sid, year = year, B0.relative = B0 / virgin, B0.absolute = B0, virgin)
 
 # ML: Species is available directly as an attribute on each icesdata FLStock
 # ML: object, same as the stock id (`name`) -- no need to depend on
@@ -103,8 +86,8 @@ species_lookup <- ldply(names(icesdata), function(id) {
 })
 
 # ML: Save the object 03-join-env-flr.R expects: named `B0`, with columns
-# ML: sid, year, B0 (= B0.relative), and species.
-B0 <- transmute(B0, sid = sid, year = year, B0 = B0.relative)
+# ML: sid, year, B0 (absolute dynamic B0, tonnes), and species. B0 is not scaled by a static reference level (e.g. virgin SSB) because the HGAM standardizes B0 within stock, which cancels any per-stock constant.
+B0 <- transmute(dat, sid = sid, year = year, B0 = B0)
 B0 <- merge(B0, species_lookup, by = "sid")
 saveRDS(B0, file = paste0(home, "/output/b0.rds"))
 

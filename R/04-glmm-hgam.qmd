@@ -133,9 +133,7 @@ nd$global_upr <- nd$global + 1.96 * nd$global_se
 ```{r}
 b0_stats <- d |> distinct(stock_f, b0_mean = b0_mean_stock, b0_sd = b0_sd_stock)
 
-# b0 = B0(t) / virgin biomass (see 02-b0.R), not B0(t)/mean(B0(t)), so b0_mean is a per-stock
-# average depletion level and is not expected to equal 1. What must hold is that b0_stats uses
-# the exact same mean/sd that built b0_sc, which is now guaranteed by construction above.
+# b0 is absolute dynamic B0(t) in tonnes (see 02-b0.R), so b0_mean is a per-stock mean biomass. What must hold is that b0_stats uses the exact same mean/sd that built b0_sc, which is now guaranteed by construction above.
 stopifnot(all(b0_stats$b0_sd > 0))
 
 fit_raw <- nd |>
@@ -151,9 +149,8 @@ ggplot() +
   geom_ribbon(data = fit_raw, aes(year, ymin = lwr_raw, ymax = upr_raw), fill = "tomato3", alpha = 0.25) +
   geom_line(data = fit_raw, aes(year, pred_raw), color = "tomato3", linewidth = 0.5) +
   facet_wrap(~stock_f, scales = "free_y", ncol = 6) +
-  geom_hline(yintercept = 1, color = "grey10", alpha = 0.4, lty = 2) +
   scale_x_continuous(breaks = c(1980, 2020)) +
-  labs(x = "Year", y = expression(paste("Relative ", B[0]))) +
+  labs(x = "Year", y = expression(B[0])) +
   theme(
     strip.text.x.top = element_text(size = 7),
     axis.text.y = element_blank(),
