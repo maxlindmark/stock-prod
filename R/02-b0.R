@@ -12,6 +12,9 @@ library(reshape)
 
 home <- here::here()
 
+# dynamic B0 from a recruitment-adjusted unfished equilibrium start (see 99-b0dyn-selftest.qmd)
+source(paste0(home, "/R/functions/b0dyn_eq_rec.R"))
+
 # ML: icesdata is a named list of FLStock objects - one per ICES stock assessment.
 # ML: Each FLStock holds the full assessment output: numbers-at-age, weight-at-age,
 # ML: maturity, natural mortality (M), and fishing mortality (F) by age and year.
@@ -55,22 +58,22 @@ bhs <- (llply(names(icesdata), function(id) {
 names(bhs) <- nms
 bhs <- FLSRs(bhs[!laply(bhs, is.null)])
 
-# ML: Save the filtered icesdata + fitted SRRs so 99-b0-drivers.R can reuse
+# ML: Save the filtered icesdata + fitted SRRs so 05-plot-b0-drivers.R can reuse
 # ML: them without re-fitting ~80 Beverton-Holt models via TMB.
 saveRDS(list(icesdata = icesdata, bhs = bhs), file = paste0(home, "/output/srr_fits.rds"))
 
-# ML: b0dyn() projects the stock forward with F = 0 using the time-varying biological
+# ML: b0dyn_eq_rec() projects the stock forward with F = 0 using the time-varying biological
 # ML: parameters (wt, mat, M) and the fitted SR model. The result is the SSB the stock
 # ML: would have had each year if it had never been fished ("dynamic B0").
+# ML: It starts from the unfished equilibrium numbers-at-age (first-year biology, SR curve scaled by the mean recruitment deviation) instead of the observed numbers-at-age used by b0dyn() (icesdata package); this start was closest to the long-run B0 in 99-b0dyn-selftest.qmd.
 # ML: B0.2 is the same projection but with SR residuals set to zero, giving the
 # ML: deterministic (mean-curve) unfished trajectory.
-# ML: NOTE: b0dyn() requires a development version of FLRef; it is not in the CRAN release.
 dat <- mdply(names(bhs), function(id) {
   print(id)
   cbind(sid = id, as.data.frame(FLQuants(
     "SSB" = ssb(icesdata[[id]]),
-    "B0" = ssb(b0dyn(icesdata[[id]], bhs[[id]])),
-    "B0.2" = ssb(b0dyn(icesdata[[id]], bhs[[id]], residuals = 0)),
+    "B0" = ssb(b0dyn_eq_rec(icesdata[[id]], bhs[[id]])),
+    "B0.2" = ssb(b0dyn_eq_rec(icesdata[[id]], bhs[[id]], residuals = 0)),
     "Rec" = rec(icesdata[[id]]),
     "Residuals" = residuals(bhs[[id]])
   ), drop = TRUE))

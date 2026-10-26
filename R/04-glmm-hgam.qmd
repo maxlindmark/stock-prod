@@ -414,8 +414,8 @@ ggplot(cater_dat, aes(y = stock_f, x = estimate, xmin = conf.low, xmax = conf.hi
 ggsave(paste0(home, "/figures/hgam_trend_since_1995_caterpillar.pdf"), width = 14, height = 24, units = "cm")
 ```
 
-## Life history and habitat variables affecting delta
-### Add life history traits, taxonomy and habitat variables
+## Life history variables affecting delta
+### Add life history traits and taxonomy
 
 ```{r}
 # Species identity + age at maturity, from icesdata
@@ -495,12 +495,6 @@ fam_lookup <- bind_rows(fam_lookup, fam_manual) |>
   # it -- dedupe here, else the downstream species join fans stock rows out (many-to-many).
   distinct(scientific_name, .keep_all = TRUE)
 
-# Demersal/pelagic/benthic habitat guild from FishBase
-species_list <- unique(traits$species)
-fb <- species(species_list) |>
-  as_tibble() |>
-  select(species = Species, DemersPelag)
-
 # Mean F per stock, F-at-age averaged across ages each year, over each stock's full available history.
 
 f_summary <- names(icesdata) |>
@@ -518,20 +512,8 @@ n_years_tab <- names(icesdata) |>
 traj_traits <- traj_summary |>
   left_join(traits, by = "stock_f") |>
   left_join(fam_lookup, by = c("species" = "scientific_name")) |>
-  left_join(fb, by = "species") |>
   left_join(f_summary, by = "stock_f") |>
-  left_join(n_years_tab, by = "stock_f") |>
-  mutate(
-    # Collapse FishBase's ~6 DemersPelag categories to 3 for readability.
-    # Pandalus borealis (pra.27.3a4a) isn't in FishBase, manually classified as benthopelagic (bottom-associated shrimp).
-    habitat_guild3 = case_when(
-      stock_f == "pra.27.3a4a" ~ "Benthopelagic",
-      DemersPelag %in% c("demersal", "bathydemersal") ~ "Demersal",
-      DemersPelag == "benthopelagic" ~ "Benthopelagic",
-      DemersPelag %in% c("bathypelagic", "pelagic-neritic", "pelagic-oceanic") ~ "Pelagic",
-      TRUE ~ NA_character_
-    )
-  )
+  left_join(n_years_tab, by = "stock_f")
 
 saveRDS(traj_traits, paste0(home, "/output/traj_traits.rds"))
 ```
@@ -544,49 +526,25 @@ param_source_table <- traits |>
   semi_join(distinct(d, stock_f), by = "stock_f") |>
   select(stock_f, species, vbge_source, l50_source) |>
   arrange(species, stock_f)
-
-param_source_table |> as.data.frame()
-```
-
-### Trend by habitat guild
-
-```{r}
-summary(aov(pct_change_total ~ habitat_guild3, data = traj_traits |> filter(!is.na(habitat_guild3))))
-
-traj_traits |>
-  filter(!is.na(habitat_guild3)) |>
-  ggplot(aes(reorder(habitat_guild3, pct_change_total, median), pct_change_total)) +
-  geom_boxplot(outlier.shape = NA) +
-  geom_jitter(width = 0.1, alpha = 0.5) +
-  coord_flip() +
-  labs(x = NULL, y = "Percent change in B0 (1995-2019)")
-
-ggsave(paste0(home, "/figures/supp/hgam_trend_by_habitat.pdf"), width = 18, height = 10, units = "cm")
 ```
 
 ### Weighted multiple regression
 
 ```{r}
-# Load ABI
-abi <- read_csv(paste0(here::here(), "/output/ts_abi.csv")) |>
-  rename(stock_f = .id) |>
-  filter(ABImsy > 0) |>
-  summarise(abi_slope = coef(lm(log(ABImsy) ~ year))[["year"]], .by = "stock_f")
+# Habitat guild (FishBase demersal/pelagic/benthopelagic) was removed because it is correlated with mean F (benthopelagic stocks are fished hardest), so the two effects could not be estimated together.
 
-traj_traits <- traj_traits |>
-  left_join(abi, by = "stock_f")
+# The ABI (age-based indicator) trend was removed as a predictor because ABI rises both when fishing eases and when recruitment falls (fewer young fish), and recruitment deviations are the main driver of dynamic B0, so its effect is ambiguous and partly circular.
 
 traj_traits <- traj_traits |>
   mutate(
     mean_F_sc = as.numeric(scale(mean_F)),
     linf_sc = as.numeric(scale(linf)),
     k_sc = as.numeric(scale(k)),
-    age_maturity_sc = as.numeric(scale(age_maturity)),
-    abi_slope_sc = as.numeric(scale(abi_slope))
+    age_maturity_sc = as.numeric(scale(age_maturity))
   )
 
 fit <- lm(
-  pct_change_total ~ mean_F_sc + linf_sc + k_sc + age_maturity_sc + abi_slope_sc,
+  pct_change_total ~ mean_F_sc + linf_sc + k_sc + age_maturity_sc,
   data = traj_traits, weights = 1 / pct_sd^2
 )
 
@@ -609,22 +567,19 @@ coef_dat <- tibble(
     term = recode(term,
       "mean_F_sc" = "Mean~F",
       "linf_sc" = "L[infinity]",
-      "abi_slope_sc" = "ABI",
       "k_sc" = "von~Bertalanffy~k",
       "age_maturity_sc" = "Age~at~maturity"
     ),
     sig = ifelse(p.value < 0.05, "Sig.", "No effect")
   )
 
-ggplot(coef_dat, aes(x = estimate, y = reorder(term, estimate), xmin = conf.low, xmax = conf.high, color = sig)) +
+p_coef <- ggplot(coef_dat, aes(x = estimate, y = reorder(term, estimate), xmin = conf.low, xmax = conf.high, color = sig)) +
   geom_vline(xintercept = 0, linetype = "dashed", color = "grey50") +
   geom_pointrange(size = 0.5, linewidth = 0.6) +
   scale_color_manual(values = c("Sig." = "steelblue", "No effect" = "grey60")) +
   scale_y_discrete(labels = function(x) parse(text = x)) +
   guides(color = "none") +
-  labs(x = "Estimate", y = NULL)
-
-ggsave(paste0(home, "/figures/supp/hgam_trait_cor_caterpillar.pdf"), width = 14, height = 8, units = "cm")
+  labs(x = "Effect on percent change (per SD)", y = NULL)
 
 # Predictions
 g <- ggeffect(fit, "mean_F_sc")
@@ -648,7 +603,7 @@ seg_layer <- geom_segment(
 )
 p_meanF$layers <- append(p_meanF$layers, list(seg_layer), after = 0)
 
-p_meanF +
+p_meanF <- p_meanF +
   theme_sleek() +
   labs(
     x = "Mean F (z-scored)",
@@ -659,9 +614,10 @@ p_meanF +
     hjust = 1.05, vjust = 1.3, size = 3
   )
 
-ggsave(paste0(home, "/figures/hgam_meanF_vs_trend.pdf"),
-  width = 11, height = 11, units = "cm"
-)
+# A: all coefficients, B: conditional effect of mean F (other predictors at their means) on top of the data
+(p_coef | p_meanF) + plot_annotation(tag_levels = "A")
+
+ggsave(paste0(home, "/figures/hgam_trait_coef.pdf"), width = 20, height = 10, units = "cm")
 
 # ggplot(traj_traits, aes(mean_F_z, pct_change_total)) + geom_point()
 ```
@@ -772,9 +728,17 @@ sst_slopes <- bind_rows(
     ),
     version = factor(version, levels = c(
       "With per-stock year smooth", "No per-stock year smooth, raw SST", "No per-stock year smooth, detrended SST"
-    )),
-    stock_f = reorder(stock_f, estimate)
+    ))
   )
+
+# Order stocks by their estimate in the middle panel, from negative (top) to positive (bottom), as in the main caterpillar figure
+sst_stock_order <- sst_slopes |>
+  filter(version == "No per-stock year smooth, raw SST") |>
+  arrange(desc(estimate)) |>
+  pull(stock_f)
+
+sst_slopes <- sst_slopes |>
+  mutate(stock_f = factor(stock_f, levels = sst_stock_order))
 
 fixed_sst <- bind_rows(
   get_fixed(m_hgam_sst, "sst_sc_lag1") |> mutate(version = "With per-stock year smooth"),
@@ -802,8 +766,8 @@ p1 <- ggplot(sst_slopes, aes(y = stock_f, x = estimate, xmin = conf.low, xmax = 
   geom_errorbar(width = 0) +
   geom_point(size = 1) +
   scale_color_manual(values = c(
-    "Positive sig." = "tomato",
-    "Negative sig." = "steelblue",
+    "Positive sig." = "steelblue",
+    "Negative sig." = "tomato",
     "No effect"     = "grey70"
   )) +
   facet_wrap(~version, ncol = 3) +

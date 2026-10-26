@@ -15,6 +15,9 @@ theme_set(theme_sleek())
 
 home <- here::here()
 
+# dynamic B0 from a recruitment-adjusted unfished equilibrium start, as in 02-b0.R
+source(paste0(home, "/R/functions/b0dyn_eq_rec.R"))
+
 # ML: Reuse the filtered icesdata + fitted Beverton-Holt SRRs saved by 02-b0.R,
 # ML: rather than re-fitting ~80 stock-recruit relationships via TMB again.
 srr_fits <- readRDS(paste0(home, "/output/srr_fits.rds"))
@@ -38,39 +41,49 @@ fix_to_mean <- function(flq) {
 # # fix it
 # fix_to_mean(stock.wt(x))
 
-# ML: For each stock, fix *one* parameter at its age-specific time-series mean and
-# calculate how much B0 variance drops vs the baseline.
+# ML: One-at-a-time decomposition. For each stock, run a reference projection with all
+# inputs fixed at their age-specific time-series means and no SR residuals. Then let *one*
+# driver vary at a time (others fixed) and take its component as the difference in log B0
+# from the reference run. A driver's contribution is the variance of that component, i.e.
+# how variable B0 would be if only that driver varied.
+# Each run starts at the unfished equilibrium for its own first-year biology (and mean residual), so there is no start-up transient: the reference run, with all inputs fixed and no residuals, is constant.
 # If a WG assumed a parameter constant by year, that parameter's contribution is automatically zero.
-# See example at the end...
+# Limitation: shares do not account for covariation among drivers (e.g. weight-at-age
+# offsetting recruitment), so we also store the ratio var(total) / sum(var(components)):
+# ~1 = drivers roughly independent and additive, <1 = they offset, >1 = they reinforce.
 dat <- ldply(names(bhs), function(id) {
   x <- icesdata[[id]]
   sr <- bhs[[id]]
 
-  # ML: one copy per parameter, each with that parameter fixed at its mean
-  x_fix_wt <- x
-  stock.wt(x_fix_wt) <- fix_to_mean(stock.wt(x))
-  x_fix_mat <- x
-  mat(x_fix_mat) <- fix_to_mean(mat(x))
-  x_fix_M <- x
-  m(x_fix_M) <- fix_to_mean(m(x))
+  # ML: reference copy with all parameters fixed at their means
+  x_ref <- x
+  stock.wt(x_ref) <- fix_to_mean(stock.wt(x))
+  mat(x_ref) <- fix_to_mean(mat(x))
+  m(x_ref) <- fix_to_mean(m(x))
 
-  # ML: b0dyn() projects the stock at F=0 using time-varying biology and the fitted SR;
+  # ML: one copy per parameter, each with only that parameter time-varying
+  x_wt <- x_ref
+  stock.wt(x_wt) <- stock.wt(x)
+  x_mat <- x_ref
+  mat(x_mat) <- mat(x)
+  x_M <- x_ref
+  m(x_M) <- m(x)
+
+  # ML: b0dyn_eq_rec() projects the stock at F=0 using time-varying biology and the fitted SR;
   # ssb() extracts the resulting unfished SSB time series.
-  # baseline has everything varying (that the stock has)
-  # Each counterfactual scenario fixes one parameter.
-  # The contribution of a parameter is the baseline variance minus variance when that
-  # parameter is fixed.
-  # SR residuals: same logic, but removed via residuals=0 argument in b0dyn.
-  b0_base <- var(log(as.numeric(ssb(b0dyn(x, sr)))), na.rm = TRUE)
+  # SR residuals are switched on/off via the residuals argument in b0dyn_eq_rec.
+  log_b0 <- function(stk, residuals) log(as.numeric(ssb(b0dyn_eq_rec(stk, sr, residuals = residuals))))
+  ref <- log_b0(x_ref, residuals = 0)
 
-  V <- c(
-    wt    = b0_base - var(log(as.numeric(ssb(b0dyn(x_fix_wt, sr)))), na.rm = TRUE),
-    mat   = b0_base - var(log(as.numeric(ssb(b0dyn(x_fix_mat, sr)))), na.rm = TRUE),
-    M     = b0_base - var(log(as.numeric(ssb(b0dyn(x_fix_M, sr)))), na.rm = TRUE),
-    resid = b0_base - var(log(as.numeric(ssb(b0dyn(x, sr, residuals = 0)))), na.rm = TRUE)
+  comp <- cbind(
+    wt    = log_b0(x_wt, residuals = 0) - ref,
+    mat   = log_b0(x_mat, residuals = 0) - ref,
+    M     = log_b0(x_M, residuals = 0) - ref,
+    resid = log_b0(x_ref, residuals = 1) - ref
   )
+  total <- log_b0(x, residuals = 1) - ref
 
-  V <- abs(V)
+  V <- apply(comp, 2, var, na.rm = TRUE)
 
   if (is.na(sum(V)) || sum(V) == 0) {
     return(NULL)
@@ -79,14 +92,21 @@ dat <- ldply(names(bhs), function(id) {
   # ML: whether each parameter is actually observed to vary by year for this
   # stock, so we want to calculate the average relative contribution not across all,
   # but by group (groups have same input time varying)
-  wt_tv  <- !isTRUE(all.equal(as.numeric(stock.wt(x)), as.numeric(stock.wt(x_fix_wt))))
-  mat_tv <- !isTRUE(all.equal(as.numeric(mat(x)), as.numeric(mat(x_fix_mat))))
-  M_tv   <- !isTRUE(all.equal(as.numeric(m(x)), as.numeric(m(x_fix_M))))
+  wt_tv  <- !isTRUE(all.equal(as.numeric(stock.wt(x)), as.numeric(stock.wt(x_ref))))
+  mat_tv <- !isTRUE(all.equal(as.numeric(mat(x)), as.numeric(mat(x_ref))))
+  M_tv   <- !isTRUE(all.equal(as.numeric(m(x)), as.numeric(m(x_ref))))
   tv_labs <- c("Wt", "Mat", "M")[c(wt_tv, mat_tv, M_tv)]
   tv_group <- if (length(tv_labs) == 0) "None t.v." else paste(tv_labs, collapse = " + ")
 
-  data.frame(sid = id, driver = names(V), var = V, var_pct = V / sum(V) * 100, tv_group = tv_group)
+  data.frame(
+    sid = id, driver = names(V), var = V, var_pct = V / sum(V) * 100, tv_group = tv_group,
+    ratio = var(total, na.rm = TRUE) / sum(V)
+  )
 }, .id = NULL)
+
+# ML: covariation diagnostic, one value per stock
+ratio_dat <- distinct(dat, sid, ratio)
+summary(ratio_dat$ratio)
 
 dat$driver <- factor(dat$driver,
   levels = c("wt", "M", "mat", "resid"),
@@ -217,7 +237,7 @@ ggsave(paste0(home, "/figures/b0_drivers_mean.pdf"),
 ids <- c("cod.27.47d20", "ple.27.21-23")
 
 dat_ex <- ldply(ids, function(id) {
-  cbind(sid = id, as.data.frame(ssb(b0dyn(icesdata[[id]], bhs[[id]])), drop = TRUE))
+  cbind(sid = id, as.data.frame(ssb(b0dyn_eq_rec(icesdata[[id]], bhs[[id]])), drop = TRUE))
 })
 
 dat_ex <- dat_ex |>

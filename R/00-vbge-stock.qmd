@@ -49,7 +49,8 @@ theme_set(theme_sleek())
 
 home <- here::here()
 
-# wggrafy-data is a sibling project (not part of this repo)
+# wggrafy-data is a different project (not part of this repo). You can find it here:
+# https://github.com/maxlindmark/wggrafy-data
 wggrafy_home <- paste0(dirname(home), "/wggrafy-data")
 ```
 
@@ -171,7 +172,7 @@ for (i in seq_along(stocks)) {
 
 coverage <- bind_rows(coverage_list) |>
   mutate(
-    # descriptive only, survey data is NOT filtered to the b0 year range
+    # descriptive only
     laa_covers_b0_range = laa_yr_min <= b0_yr_min & laa_yr_max >= b0_yr_max
   )
 
@@ -189,11 +190,6 @@ cat(
 ```
 
 ## Coverage plots
-
-Two overlapping, semi-transparent bars per stock: a background bar (grey) for the full
-extent the stock is defined over, and a foreground bar (blue) for what's actually covered
-by survey data. Where they match exactly, the blue bar fully covers the grey one and it
-reads as a single solid bar; any grey showing past the blue is the shortfall.
 
 ```{r}
 #| warning: false
@@ -213,9 +209,9 @@ ggplot(subdiv_cov_dat, aes(y = stock, x = n, fill = type)) +
     "Subdivisions with survey data"    = "steelblue"
   )) +
   labs(x = "Number of ICES subdivisions", y = NULL, fill = NULL) +
-  theme(legend.position = "bottom", axis.text.y = element_text(size = 6))
+  theme(legend.position = "bottom")
 
-ggsave(paste0(home, "/figures/supp/vbge_coverage_subdivisions.pdf"), width = 14, height = 26, units = "cm")
+ggsave(paste0(home, "/figures/supp/vbge_coverage_subdivisions.pdf"), width = 14, height = 20, units = "cm")
 
 year_cov_dat <- coverage |>
   filter(n_rows > 0) |> # laa_yr_min/max are +-Inf when a stock has zero survey rows
@@ -233,14 +229,14 @@ ggplot(year_cov_dat, aes(y = stock, color = type)) +
     "Survey (length-at-age) years"  = "steelblue"
   )) +
   labs(x = "Year", y = NULL, color = NULL) +
-  theme(legend.position = "bottom", axis.text.y = element_text(size = 6))
+  theme(legend.position = "bottom")
 
-ggsave(paste0(home, "/figures/supp/vbge_coverage_years.pdf"), width = 14, height = 26, units = "cm")
+ggsave(paste0(home, "/figures/supp/vbge_coverage_years.pdf"), width = 14, height = 17, units = "cm")
 ```
 
 ## Fit stock-specific VBGE with RTMB
 
-Standard (non-omega, non-spatial, non-time-varying) VBGE:
+Standard VBGE:
 
 $$\hat{l}_i = L_\infty \left(1 - e^{-K(a_i - t_0)}\right), \quad \log(l_i) \sim \text{Normal}(\log(\hat{l}_i), \sigma^2)$$
 
@@ -345,17 +341,11 @@ fit_status |> count(fit_status)
 
 ## Plausibility check: drop implausible Linf estimates
 
-The bound check above only catches fits that ran all the way to the box constraint. A
-generous bound (3x the stock's own max observed length) leaves room for some fits to
-settle on the same Linf -> Inf, K -> 0 identifiability ridge at a point that's *locally*
-well-conditioned (converges, passes pdHess) but still biologically implausible -- e.g.
-`cod.27.6a` at Linf = 209 cm, `pok.27.3a46` at 197 cm.
-
-FishLife's species-level Linf is an independent, literature-based sanity check. Comparing
+The bound check above only catches fits that ran all the way to the constraint. 
+FishLife's species-level Linf is an independent, literature-based check. Comparing
 `Linf_new / Linf_species` across all "ok" fits shows most stocks sit close to their
 species value (IQR 0.83-1.16), then a clean gap, then a small cluster from 1.55 up to
-2.33 -- those are the same identifiability-ridge fits (paired with an implausibly small
-K), so anything above that gap is dropped back to the species-level fallback.
+2.33.
 
 ```{r}
 #| warning: false
