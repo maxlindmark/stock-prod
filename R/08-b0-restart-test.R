@@ -10,7 +10,7 @@ theme_set(theme_sleek())
 
 home <- here::here()
 
-# Restart test of the starting numbers-at-age of the B0 projection (supporting figures for the choice of start, see 99-b0dyn-selftest.qmd for the full exploration).
+# Restart test of the starting numbers-at-age of the B0 projection (supporting figures for the choice of start).
 # Each stock's B0 is projected over its full series, and then restarted 30, 35, ..., 55 years into the series with the same start method. By then the full-length run no longer depends on its start, so the closer the restarted run starts to it, and the faster it converges on it, the smaller the transient a start causes.
 # Three starts are compared: the observed numbers-at-age with fishing removed (b0dyn() with its doubling bug fixed), the unfished equilibrium, and the unfished equilibrium with the SR curve scaled by the mean recruitment deviation (main method).
 

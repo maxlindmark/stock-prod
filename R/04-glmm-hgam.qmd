@@ -451,37 +451,8 @@ traits <- traits |>
   ) |>
   select(-linf_avg, -k_avg)
 
-# Length at 50% maturity (L50), from data/l50_clean.rds (logistic maturity-ogive fits to
-# survey data): stock-specific estimate where available, falling back to the species-level
-# (pooled across stocks) estimate, and calculated from age at 50% maturity (age_maturity, 
-# from icesdata's mat50() above) via each stock's own VBGE parameters (inverse VBGE, t0 = 0;
-# t0 isn't estimated/stored anywhere in this pipeline).
-l50_dat <- readRDS(paste0(home, "/data/l50_clean.rds")) |> ungroup()
-
-l50_stock <- l50_dat |>
-  filter(model == "Stock", sex == "Combined", is.na(period), is.na(ices_area)) |>
-  transmute(species_stock, l50_stock = l50_est)
-
-l50_species <- l50_dat |>
-  filter(model == "Global", sex == "Combined", is.na(period)) |>
-  transmute(species_clean, l50_species = l50_est)
-
-traits <- traits |>
-  mutate(
-    species_clean = gsub(" ", "_", species),
-    species_stock = paste0(species_clean, "_", stock_f)
-  ) |>
-  left_join(l50_stock, by = "species_stock") |>
-  left_join(l50_species, by = "species_clean") |>
-  mutate(
-    l50_from_vbge = linf * (1 - exp(-k * age_maturity)),
-    l50 = coalesce(l50_stock, l50_species, l50_from_vbge),
-    l50_source = ifelse(!is.na(l50_stock) | !is.na(l50_species), "l50", "from icesdata a50")
-  ) |>
-  select(-species_clean, -species_stock, -l50_stock, -l50_species, -l50_from_vbge)
-
 # WoRMS species-to-family lookup from the stomachr package, plus a manual patch for species missing from that lookup (data from stomachr package)
-load("/Users/maxlindmark/Dropbox/max-work/R/stomachr/data/worms_lookup.rda")
+load(paste0(home, "/data/worms_lookup.rda"))
 fam_lookup <- worms_lookup |> distinct(scientific_name, family)
 fam_manual <- tibble(
   scientific_name = c(
@@ -518,13 +489,13 @@ traj_traits <- traj_summary |>
 saveRDS(traj_traits, paste0(home, "/output/traj_traits.rds"))
 ```
 
-### VBGE and L50 parameter sources
+### VBGE parameter sources
 
 ```{r}
-# Table of vbge and l50 parameter source for each stock
+# Table of vbge parameter source for each stock
 param_source_table <- traits |>
   semi_join(distinct(d, stock_f), by = "stock_f") |>
-  select(stock_f, species, vbge_source, l50_source) |>
+  select(stock_f, species, vbge_source) |>
   arrange(species, stock_f)
 ```
 

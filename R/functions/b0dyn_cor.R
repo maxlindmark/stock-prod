@@ -1,4 +1,4 @@
-# Dynamic B0 from a numbers-at-age start: b0dyn() (icesdata package) with its doubling bug fixed. b0dyn() sets the starting numbers to stock.n + stock.n %*% srvAdj, i.e. the observed numbers plus the observed numbers with fishing removed, which counts them twice; here they are stock.n %*% srvAdj only. Used as the numbers-at-age alternative to b0dyn_eq_rec() (see 99-b0dyn-selftest.qmd and 07-sensitivity-b0.R)
+# Dynamic B0 from a numbers-at-age start: b0dyn() (icesdata package) with its doubling bug fixed. b0dyn() sets the starting numbers to stock.n + stock.n %*% srvAdj, i.e. the observed numbers plus the observed numbers with fishing removed, which counts them twice; here they are stock.n %*% srvAdj only. Used as the numbers-at-age alternative to b0dyn_eq_rec() (see 07-sensitivity-b0.R and 08-b0-restart-test.R)
 b0dyn_cor = function(object, sr, residuals = 1) {
   # which years to set: the first year if youngest age is 0 or 1, the first 2 years if it is 2, etc.
   yrs = seq(max(1, dims(object)$min))

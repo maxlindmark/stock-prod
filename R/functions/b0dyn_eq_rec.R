@@ -1,4 +1,4 @@
-# Dynamic B0 from a recruitment-adjusted unfished equilibrium start. Same as b0dyn() (icesdata package), except for the starting numbers-at-age: instead of the observed numbers with fishing removed, the first year(s) get the unfished equilibrium numbers-at-age for the first year's biology, with the SR curve scaled by the mean recruitment deviation. Tested against b0dyn() and other starts in 99-b0dyn-selftest.qmd
+# Dynamic B0 from a recruitment-adjusted unfished equilibrium start. Same as b0dyn() (icesdata package), except for the starting numbers-at-age: instead of the observed numbers with fishing removed, the first year(s) get the unfished equilibrium numbers-at-age for the first year's biology, with the SR curve scaled by the mean recruitment deviation. Tested against b0dyn() and other starts in 08-b0-restart-test.R
 b0dyn_eq_rec = function(object, sr, residuals = 1) {
   # which years to set: the first year if youngest age is 0 or 1, the first 2 years if it is 2, etc.
   yrs = seq(max(1, dims(object)$min))

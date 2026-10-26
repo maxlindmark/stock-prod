@@ -15,7 +15,7 @@ We use [`renv`](https://rstudio.github.io/renv/articles/renv.html) to manage pac
 
 `R`: code to prepare data, fit models, and make figures
 
-`data`: stock-area csv; most data are generated from loaded R packages
+`data`: stock-area csv; most data are generated from loaded R packages. `data/env` (CMIP6 SST and salinity from CNRM-CM6-1-HR, about 4 GB per file) is not included; download the files as described at the top of `R/01-sal-sst.R`. Only `01-sal-sst.R` needs them, and its output (`output/sst_sal_sd_year_1940_2020.csv`) is included, so you can skip step 01 and start from `02-b0.R`
 
 `figures`: figures for paper are saved here
 
