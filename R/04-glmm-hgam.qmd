@@ -687,7 +687,7 @@ get_fixed <- function(model, covariate) {
 sst_slopes <- bind_rows(
   get_slopes(m_hgam_sst, "sst_sc_lag1", d) |> mutate(version = "With per-stock year smooth"),
   get_slopes(m_hgam_sst_noyearslope, "sst_sc_lag1", d) |> mutate(version = "No per-stock year smooth, raw SST"),
-  get_slopes(m_hgam_sst_detrend, "sst_detrend", d_detrend) |> mutate(version = "No per-stock year smooth, detrended SST")
+  get_slopes(m_hgam_sst_detrend, "sst_detrend", d_detrend) |> mutate(version = "No per-stock year smooth,\ndetrended SST")
 ) |>
   mutate(
     conf.low = estimate - 1.96 * se,
@@ -698,7 +698,7 @@ sst_slopes <- bind_rows(
       TRUE ~ "No effect"
     ),
     version = factor(version, levels = c(
-      "With per-stock year smooth", "No per-stock year smooth, raw SST", "No per-stock year smooth, detrended SST"
+      "With per-stock year smooth", "No per-stock year smooth, raw SST", "No per-stock year smooth,\ndetrended SST"
     ))
   )
 
@@ -714,13 +714,13 @@ sst_slopes <- sst_slopes |>
 fixed_sst <- bind_rows(
   get_fixed(m_hgam_sst, "sst_sc_lag1") |> mutate(version = "With per-stock year smooth"),
   get_fixed(m_hgam_sst_noyearslope, "sst_sc_lag1") |> mutate(version = "No per-stock year smooth, raw SST"),
-  get_fixed(m_hgam_sst_detrend, "sst_detrend") |> mutate(version = "No per-stock year smooth, detrended SST")
+  get_fixed(m_hgam_sst_detrend, "sst_detrend") |> mutate(version = "No per-stock year smooth,\ndetrended SST")
 ) |>
   mutate(
     conf.low = estimate - 1.96 * se,
     conf.high = estimate + 1.96 * se,
     version = factor(version, levels = c(
-      "With per-stock year smooth", "No per-stock year smooth, raw SST", "No per-stock year smooth, detrended SST"
+      "With per-stock year smooth", "No per-stock year smooth, raw SST", "No per-stock year smooth,\ndetrended SST"
     ))
   )
 
