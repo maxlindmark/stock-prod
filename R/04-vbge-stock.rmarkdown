@@ -15,9 +15,10 @@ knitr:
 editor: source
 ---
 
+
 ## Background
 
-The VBGE parameters ($L_\infty$, $K$) used in `04-glmm-hgam.qmd` come from FishLife
+The VBGE parameters ($L_\infty$, $K$) used in `06-glmm-hgam.qmd` come from FishLife
 (`icesdata`'s `fishlife` attribute), which is resolved at the *species* level, not the
 *stock* level -- every stock of e.g. `Gadus morhua` gets the same $L_\infty$/$K$
 regardless of which stock it actually is.
@@ -26,7 +27,10 @@ Here we instead fit a standard VBGE per *stock*, using survey length-at-age data
 `wggrafy-data` project (`north-east-atlantic-datras` region), restricted to the ICES
 subdivisions each stock occupies.
 
+**Data version.** The survey data were retrieved locally, not from a public archive: the raw DATRAS exchange data were downloaded from the ICES DATRAS API (`DATRASextra` version 0.6.1) on 2026-10-13 (all 868 survey-year-quarter files, survey years 1965--2025; see `wggrafy-data/raw_data/north-east-atlantic-datras/DATRAS_manifest.csv`), and cleaned and merged with the `wggrafy-data` pipeline on 2026-11-03 (`outputs/ind_age_all.rds`, `haul_all.rds`, `species_all.rds`). Results from earlier versions of these files differ, because the cleaning pipeline and the downloaded data have changed.
+
 ## Load libraries
+
 
 ```{r}
 #| warning: false
@@ -51,10 +55,12 @@ home <- here::here()
 
 # wggrafy-data is a different project (not part of this repo). You can find it here:
 # https://github.com/maxlindmark/wggrafy-data
-wggrafy_home <- paste0(dirname(home), "/wggrafy-data")
+wggrafy_home <- "/Users/maxlindmark/Dropbox/max-work/R/wggrafy-data"
 ```
 
+
 ## Stocks going into script 04, and their current (species-level) VBGE parameters
+
 
 ```{r}
 #| warning: false
@@ -67,7 +73,7 @@ stocks <- stock_species$stock
 
 n_distinct(stocks)
 
-# Current approach (as in 04-glmm-hgam.qmd): FishLife linf/k, resolved per stock name
+# Current approach (as in 06-glmm-hgam.qmd): FishLife linf/k, resolved per stock name
 # in icesdata but only varying by species (duplicated across stocks of the same species)
 current_vbge <- names(icesdata) |>
   map(function(stock_name) {
@@ -84,9 +90,11 @@ current_vbge <- names(icesdata) |>
 current_vbge
 ```
 
+
 ## Map each stock to its ICES subdivisions
 
 Same key + manual patches as `03-join-env-flr.R`.
+
 
 ```{r}
 #| warning: false
@@ -104,15 +112,30 @@ key <- read_csv(paste0(home, "/data/stocks_per_area2025.csv"), show_col_types = 
 stopifnot(all(stocks %in% key$StockKeyLabel))
 ```
 
+
 ## Read survey length-at-age data and assign ICES subdivisions
+
 
 ```{r}
 #| warning: false
 #| message: false
 
 tic()
-len <- readRDS(paste0(wggrafy_home, "/outputs/length_all.rds")) |>
-  filter(!is.na(lngt_cm), !is.na(age), !is.na(lon), !is.na(lat))
+# Individual length (cm) and age, joined with haul position and year, and species names. Identical fish (same haul, length and age) are stored as one row with a count n, so rows are expanded to one per fish.
+haul <- readRDS(paste0(wggrafy_home, "/outputs/haul_all.rds")) |>
+  mutate(haul_id = as.character(haul_id), year = as.numeric(format(date, "%Y")), lon = longitude, lat = latitude) |>
+  dplyr::select(haul_id, year, lon, lat)
+
+species_key <- readRDS(paste0(wggrafy_home, "/outputs/species_all.rds")) |>
+  mutate(species = unname(species))
+
+len <- readRDS(paste0(wggrafy_home, "/outputs/ind_age_all.rds")) |>
+  mutate(haul_id = as.character(haul_id)) |>
+  left_join(haul, by = "haul_id") |>
+  left_join(species_key, by = "aphia_id") |>
+  dplyr::select(species, year, lon, lat, lngt_cm = lngt, age, n) |>
+  filter(!is.na(lngt_cm), !is.na(age), !is.na(lon), !is.na(lat)) |>
+  uncount(n)
 toc()
 
 # sp/over on unique coordinates only (much faster than per-row), same approach as
@@ -128,11 +151,13 @@ len <- len |>
   filter(!is.na(sub_div))
 ```
 
+
 ## Filter length-at-age data per stock, track coverage, bind rows
 
 For each stock: filter survey data to its species and its ICES subdivisions (from
 `key`), then record how many of the stock's subdivisions actually have survey data, and
 how the survey year range compares to the year range of the `b0` data used in script 04.
+
 
 ```{r}
 #| warning: false
@@ -189,7 +214,9 @@ cat(
 )
 ```
 
+
 ## Coverage plots
+
 
 ```{r}
 #| warning: false
@@ -234,6 +261,7 @@ ggplot(year_cov_dat, aes(y = stock, color = type)) +
 ggsave(paste0(home, "/figures/supp/vbge_coverage_years.pdf"), width = 14, height = 17, units = "cm")
 ```
 
+
 ## Fit stock-specific VBGE with RTMB
 
 Standard VBGE:
@@ -242,6 +270,7 @@ $$\hat{l}_i = L_\infty \left(1 - e^{-K(a_i - t_0)}\right), \quad \log(l_i) \sim 
 
 fit independently per stock. Stocks with too little data to identify three growth
 parameters are skipped.
+
 
 ```{r}
 #| warning: false
@@ -339,6 +368,7 @@ fit_status <- bind_rows(fit_status_list)
 fit_status |> count(fit_status)
 ```
 
+
 ## Plausibility check: drop implausible Linf estimates
 
 The bound check above only catches fits that ran all the way to the constraint. 
@@ -346,6 +376,7 @@ FishLife's species-level Linf is an independent, literature-based check. Compari
 `Linf_new / Linf_species` across all "ok" fits shows most stocks sit close to their
 species value (IQR 0.83-1.16), then a clean gap, then a small cluster from 1.55 up to
 2.33.
+
 
 ```{r}
 #| warning: false
@@ -389,7 +420,9 @@ cat(
 )
 ```
 
+
 ## Caterpillar plot: current (species-level) vs. stock-specific VBGE parameters
+
 
 ```{r}
 #| warning: false
@@ -444,11 +477,13 @@ ggplot(cater_dat, aes(y = stock, x = estimate, color = source)) +
 # )
 ```
 
+
 ## Final VBGE parameter set for script 04
 
 One row per stock: the stock-specific (survey) estimate where the fit was identifiable
 (`fit_status == "ok"`), falling back to the current species-level FishLife value
 otherwise.
+
 
 ```{r}
 #| warning: false
@@ -477,3 +512,60 @@ saveRDS(vbge_final, paste0(home, "/output/vbge_final.rds"))
 
 vbge_final
 ```
+
+
+## Table for the supporting information
+
+One row per stock with the parameter source and the $L_\infty$ and $k$ used in the regression in `06-glmm-hgam.qmd`. Stock-specific estimates have 95% confidence intervals (estimate $\pm$ 1.96 SE, from the delta method in `sdreport()`); species-level FishLife values have none. The LaTeX code (booktabs + longtable, so it can span pages) is printed below and saved to `output/vbge_table.tex`.
+
+
+```{r}
+#| output: asis
+
+fmt_ci <- function(est, se, digits) {
+  ifelse(is.na(se),
+    formatC(est, format = "f", digits = digits),
+    paste0(formatC(est, format = "f", digits = digits), " (", formatC(est - 1.96 * se, format = "f", digits = digits), "--", formatC(est + 1.96 * se, format = "f", digits = digits), ")")
+  )
+}
+
+se_wide <- vbge_fits |>
+  dplyr::select(stock, parameter, se) |>
+  pivot_wider(names_from = parameter, values_from = se, names_prefix = "se_")
+
+vbge_tab <- vbge_final |>
+  left_join(se_wide, by = "stock") |>
+  mutate(
+    se_Linf = ifelse(source == "stock-specific (survey)", se_Linf, NA),
+    se_K = ifelse(source == "stock-specific (survey)", se_K, NA),
+    Source = ifelse(source == "stock-specific (survey)", "Stock", "Species"),
+    Linf_txt = fmt_ci(Linf, se_Linf, 1),
+    K_txt = fmt_ci(K, se_K, 3)
+  ) |>
+  arrange(species, stock)
+
+tab_rows <- paste0(vbge_tab$stock, " & \\textit{", vbge_tab$species, "} & ", vbge_tab$Source, " & ", vbge_tab$Linf_txt, " & ", vbge_tab$K_txt, " \\\\")
+
+tab_tex <- c(
+  "\\begin{longtable}{lllll}",
+  "\\caption{Von Bertalanffy growth parameters used in the regression of percent change in $B_0$. Stock: estimated from survey length-at-age data for that stock, with 95\\% confidence intervals in parentheses (Supporting Information S2). Species: species-level values from FishLife, used where no accepted stock-specific fit was available.}",
+  "\\label{tab:vbge}\\\\",
+  "\\toprule",
+  "Stock & Species & Source & $L_\\infty$ (cm) & $k$ (yr$^{-1}$) \\\\",
+  "\\midrule",
+  "\\endfirsthead",
+  "\\toprule",
+  "Stock & Species & Source & $L_\\infty$ (cm) & $k$ (yr$^{-1}$) \\\\",
+  "\\midrule",
+  "\\endhead",
+  "\\bottomrule",
+  "\\endfoot",
+  tab_rows,
+  "\\end{longtable}"
+)
+
+writeLines(tab_tex, paste0(home, "/output/vbge_table.tex"))
+
+cat("```latex", tab_tex, "```", sep = "\n")
+```
+

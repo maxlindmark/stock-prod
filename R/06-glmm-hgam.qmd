@@ -45,6 +45,9 @@ theme_set(theme_sleek())
 
 home <- here::here()
 
+# Fix the random number generator so simulated quantities and jittered points are reproducible
+set.seed(42)
+
 source(paste0(home, "/R/functions/ggdharma.R"))
 
 dat <- read_csv(paste0(home, "/output/dat.csv"))
@@ -96,6 +99,37 @@ saveRDS(m_hgam, paste0(home, "/output/m_hgam.rds"))
 summary(m_hgam)
 ```
 
+```{r}
+# Basis dimension checks indicated remaining residual structure along year, which likely reflects within-stock autocorrelation and abrupt shifts in a few stocks rather than too few basis functions.
+tic()
+m_hgam2 <- mgcv::gam(
+  b0_sc ~ s(year_ct, k = 12, m = 2) +
+    s(year_ct, stock_f, bs = "fs", k = 6, m = 1),
+  data = d,
+  family = scat(),
+  method = "REML"
+)
+toc()
+#saveRDS(m_hgam2, paste0(home, "/output/m_hgam2.rds"))
+
+tic()
+m_hgam3 <- mgcv::gam(
+  b0_sc ~ s(year_ct, k = 12, m = 2) +
+    s(year_ct, stock_f, bs = "fs", k = 8, m = 1),
+  data = d,
+  family = scat(),
+  method = "REML"
+)
+toc()
+
+summary(m_hgam)
+summary(m_hgam2)
+summary(m_hgam3)
+gam.check(m_hgam)
+gam.check(m_hgam2)
+gam.check(m_hgam3)
+```
+
 ## QQ
 
 ```{r}
@@ -141,23 +175,29 @@ fit_raw <- nd |>
   mutate(
     pred_raw = pred * b0_sd + b0_mean,
     lwr_raw  = (pred - 1.96 * pred_se) * b0_sd + b0_mean,
-    upr_raw  = (pred + 1.96 * pred_se) * b0_sd + b0_mean
+    upr_raw  = (pred + 1.96 * pred_se) * b0_sd + b0_mean,
+    # shared (global) smooth only, back-transformed with the same stock's mean and SD
+    global_raw = global * b0_sd + b0_mean,
+    global_lwr_raw = global_lwr * b0_sd + b0_mean,
+    global_upr_raw = global_upr * b0_sd + b0_mean
   )
 
 ggplot() +
   geom_point(data = d, aes(year, b0), color = "grey30", size = 0.2) +
   geom_ribbon(data = fit_raw, aes(year, ymin = lwr_raw, ymax = upr_raw), fill = "tomato3", alpha = 0.25) +
+  geom_ribbon(data = fit_raw, aes(year, ymin = global_lwr_raw, ymax = global_upr_raw), fill = "steelblue", alpha = 0.25) +
+  geom_line(data = fit_raw, aes(year, global_raw), color = "steelblue", linewidth = 0.5) +
   geom_line(data = fit_raw, aes(year, pred_raw), color = "tomato3", linewidth = 0.5) +
-  facet_wrap(~stock_f, scales = "free_y", ncol = 6) +
+  facet_wrap(~stock_f, scales = "free_y", ncol = 7) +
   scale_x_continuous(breaks = c(1980, 2020)) +
   labs(x = "Year", y = expression(B[0])) +
   theme(
-    strip.text.x.top = element_text(size = 7),
+    #strip.text.x.top = element_text(size = 6),
     axis.text.y = element_blank(),
     axis.ticks.y = element_blank()
   )
 
-ggsave(paste0(home, "/figures/supp/hgam_fit_vs_raw_b0.pdf"), width = 21, height = 30, units = "cm")
+ggsave(paste0(home, "/figures/hgam_fit_vs_raw_b0.pdf"), width = 21, height = 26, units = "cm")
 ```
 
 ## Global (shared) smooth
@@ -204,26 +244,6 @@ ggplot(global_dat, aes(year, global)) +
   theme(legend.position.inside = c(0.95, 0.95), legend.justification = c(1, 1))
 
 ggsave(paste0(home, "/figures/hgam_year_global.pdf"), width = 12, height = 9, units = "cm")
-```
-
-```{r}
-# Abbreviate species names in faceted plot
-abbrev_species <- function(x) sub("^(\\S)\\S+ ", "\\1. ", x)
-
-ggplot() +
-  geom_line(data = nd, aes(year, pred, color = stock_f, group = stock_f), alpha = 0.5, linewidth = 0.6) +
-  geom_line(data = global_dat, aes(year, global), color = "grey10") +
-  scale_color_viridis(option = "magma", discrete = TRUE, end = 0.95, begin = 0.2) +
-  scale_x_continuous(breaks = c(1975, 1995, 2015)) +
-  facet_wrap(~species_f, ncol = 5, scales = "free", labeller = as_labeller(abbrev_species)) +
-  guides(color = "none") +
-  # theme(strip.text.x.top = element_text(size = 6.8)) +
-  labs(
-    x = "Year",
-    y = expression(paste("Predicted ", B[0], " by species and stock (scaled)"))
-  )
-
-ggsave(paste0(home, "/figures/hgam_all_stocks_overlaid.pdf"), width = 21, height = 21, units = "cm")
 ```
 
 ## Stock trajectories (delta)
@@ -344,74 +364,69 @@ tibble(
 
 ### Plot delta prediction (2019 vs 1995)
 
+Stocks are grouped by ICES ecoregion (assigned in `05-stock-ecoregion.R`; small ecoregions merged with neighbours, stocks spread over several ecoregions grouped as "Widely distributed"). The grouping is only used for display, not in the model.
+
 ```{r}
-stock_order <- traj_summary |>
-  arrange(desc(pct_change_total)) |>
-  pull(stock_f)
+stock_eco <- read_csv(paste0(home, "/output/stock_ecoregion.csv"), show_col_types = FALSE)
 
-# pct_lwr/pct_upr come directly from the coefficient-posterior simulation above,
-# so this CI already accounts for the ratio's skew.
+# pct_lwr/pct_upr come directly from the coefficient-posterior simulation above, so this CI already accounts for the ratio's skew.
 cater_dat <- traj_summary |>
-  transmute(
-    stock_f,
-    estimate = pct_change_total,
-    conf.low = pct_lwr,
-    conf.high = pct_upr
-  ) |>
+  transmute(stock_f = as.character(stock_f), estimate = pct_change_total, conf.low = pct_lwr, conf.high = pct_upr) |>
+  left_join(select(stock_eco, stock_f = stock, ecoregion), by = "stock_f") |>
   mutate(
-    sig = case_when(
-      conf.low > 0 ~ "Positive sig.",
-      conf.high < 0 ~ "Negative sig.",
-      TRUE ~ "No effect"
-    ),
-    stock_f = factor(stock_f, levels = stock_order)
+    sig = case_when(conf.low > 0 ~ "Positive sig.", conf.high < 0 ~ "Negative sig.", TRUE ~ "No effect"),
+    # most negative at the top within each ecoregion
+    stock_f = reorder(stock_f, -estimate)
   )
 
-n_stocks <- n_distinct(cater_dat$stock_f)
-median_pct <- median(cater_dat$estimate)
+stopifnot(!anyNA(cater_dat$ecoregion))
 
-pct_dat <- cater_dat |>
-  count(sig) |>
-  mutate(pct = round(100 * n / sum(n))) |>
-  mutate(
-    label = case_when(
-      sig == "Positive sig." ~ sprintf("Increasing: %d%%", pct),
-      sig == "Negative sig." ~ sprintf("Decreasing: %d%%", pct),
-      TRUE ~ sprintf("No change: %d%%", pct)
-    ),
-    y_pos = case_when(
-      sig == "Negative sig." ~ 3,
-      sig == "No effect" ~ 4.5,
-      sig == "Positive sig." ~ 6
-    )
-  )
+# Split ecoregions into two columns of similar length (largest first, greedy; +2 rows per panel for the strip)
+eco_n <- count(cater_dat, ecoregion) |> arrange(desc(n))
+eco_n$col <- NA_integer_
+col_rows <- c(0, 0)
+for (i in seq_len(nrow(eco_n))) {
+  j <- which.min(col_rows)
+  eco_n$col[i] <- j
+  col_rows[j] <- col_rows[j] + eco_n$n[i] + 2
+}
 
-ggplot(cater_dat, aes(y = stock_f, x = estimate, xmin = conf.low, xmax = conf.high, color = sig)) +
-  geom_vline(xintercept = 0, color = "grey50", linetype = 2) +
-  geom_vline(xintercept = median_pct, color = "tomato", linetype = 3) +
-  geom_errorbar(width = 0) +
-  geom_point(size = 1) +
-  geom_text(
-    data = pct_dat, aes(x = Inf, y = Inf, vjust = y_pos, label = label, color = sig),
-    inherit.aes = FALSE, hjust = 1.05, size = 3, show.legend = FALSE
-  ) +
-  annotate(
-    "text",
-    x = Inf, y = Inf, vjust = 1.5, label = sprintf("Median change: %.0f%%", median_pct),
-    hjust = 1.05, size = 3, color = "grey20"
-  ) +
-  scale_color_manual(values = c(
-    "Positive sig." = "steelblue",
-    "Negative sig." = "tomato",
-    "No effect"     = "grey70"
-  )) +
-  labs(x = expression(paste("Percent change in ", B[0])), y = NULL) +
-  theme(
-    legend.title = element_blank(),
-    legend.position = "bottom"
-  )
+sig_cols <- c("Negative sig." = "tomato", "No effect" = "grey70", "Positive sig." = "steelblue")
+x_range <- range(c(cater_dat$conf.low, cater_dat$conf.high))
 
-ggsave(paste0(home, "/figures/hgam_trend_since_1995_caterpillar.pdf"), width = 14, height = 24, units = "cm")
+# One panel per ecoregion, x-axis labels only on the bottom panel of each column
+cater_panel <- function(eco, bottom) {
+  ggplot(filter(cater_dat, ecoregion == eco), aes(y = stock_f, x = estimate, xmin = conf.low, xmax = conf.high, color = sig)) +
+    geom_vline(xintercept = 0, color = "grey50", linetype = 2) +
+    geom_errorbar(width = 0, show.legend = TRUE) +
+    geom_point(size = 1, show.legend = TRUE) +
+    facet_wrap(~ecoregion, labeller = as_labeller(function(x) paste0(x, " (n=", eco_n$n[match(x, eco_n$ecoregion)], ")"))) +
+    scale_color_manual(values = sig_cols, limits = names(sig_cols), drop = FALSE) +
+    coord_cartesian(xlim = x_range) +
+    theme(
+      strip.text = element_text(size = 7.5),
+      axis.text.y = element_text(size = 6.5),
+      legend.title = element_blank(),
+      axis.text.x = if (bottom) element_text() else element_blank(),
+      axis.ticks.x = if (bottom) element_line() else element_blank()
+    ) +
+    labs(x = NULL, y = NULL)
+}
+
+cater_column <- function(j) {
+  e <- eco_n$ecoregion[eco_n$col == j]
+  wrap_plots(lapply(seq_along(e), function(i) cater_panel(e[i], i == length(e))), ncol = 1, heights = eco_n$n[eco_n$col == j] + 1.2)
+}
+
+# Shared x-axis title and a single legend below both columns
+x_title <- wrap_elements(full = grid::textGrob(expression(paste("Percent change in ", B[0])), gp = grid::gpar(fontsize = 11)))
+cater_legend <- wrap_elements(full = cowplot::get_plot_component(cater_panel(eco_n$ecoregion[1], TRUE) + theme(legend.position = "bottom"), "guide-box-bottom"))
+
+(cater_column(1) | cater_column(2)) / x_title / cater_legend +
+  plot_layout(heights = c(1, 0.03, 0.03)) &
+  theme(legend.position = "none")
+
+ggsave(paste0(home, "/figures/hgam_trend_since_1995_caterpillar.pdf"), width = 21, height = 19, units = "cm")
 ```
 
 ## Life history variables affecting delta
@@ -429,7 +444,7 @@ traits <- names(icesdata) |>
   }) |>
   list_rbind()
 
-# VBGE parameters (Linf, K), from 00-vbge-stock.qmd: stock-specific RTMB fit to survey
+# VBGE parameters (Linf, K), from 04-vbge-stock.qmd: stock-specific RTMB fit to survey
 # length-at-age data where identifiable, falling back to FishLife's species-level value
 # otherwise (see output/vbge_final.rds for the per-stock fit status/source).
 vbge <- readRDS(paste0(home, "/output/vbge_final.rds")) |>
@@ -437,7 +452,7 @@ vbge <- readRDS(paste0(home, "/output/vbge_final.rds")) |>
 
 # Species-level mean (across other stocks of the same species already in vbge_final) as a
 # defensive fallback for any stock missing from vbge_final entirely (e.g. added to dat.csv
-# without re-running 00-vbge-stock.qmd) -- not expected to trigger for the current stock set.
+# without re-running 04-vbge-stock.qmd) -- not expected to trigger for the current stock set.
 vbge_species_avg <- vbge |>
   summarise(linf_avg = mean(linf, na.rm = TRUE), k_avg = mean(k, na.rm = TRUE), .by = species)
 
@@ -781,7 +796,8 @@ sst_reg_by_stock <- d |>
 
 sst_reg_by_stock |> count(sig)
 
-ggplot(sst_reg_by_stock, aes(y = reorder(stock_f, estimate), x = estimate, xmin = conf.low, xmax = conf.high, color = sig)) +
+# lowest slope at the top
+ggplot(sst_reg_by_stock, aes(y = reorder(stock_f, -estimate), x = estimate, xmin = conf.low, xmax = conf.high, color = sig)) +
   geom_vline(xintercept = 0, color = "grey50") +
   geom_errorbar(width = 0) +
   geom_point(size = 1.5) +

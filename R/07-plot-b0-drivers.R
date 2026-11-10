@@ -224,7 +224,7 @@ p2
   plot_layout(heights = c(1, 0.1)) +
   plot_annotation(tag_levels = "A")
 
-ggsave(paste0(home, "/figures/b0_drivers_mean.pdf"),
+ggsave(paste0(home, "/figures/supp/b0_drivers_mean.pdf"),
   width = 21, height = 24, units = "cm"
 )
 

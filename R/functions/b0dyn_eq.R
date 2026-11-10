@@ -1,4 +1,4 @@
-# Dynamic B0 from an unfished equilibrium start, without the recruitment-deviation adjustment: same as b0dyn_eq_rec(), but the equilibrium recruitment comes from the fitted SR curve itself (a - b / spr0), not the curve scaled by the mean recruitment deviation. Used only for comparison in 08-b0-restart-test.R
+# Dynamic B0 from an unfished equilibrium start, without the recruitment-deviation adjustment: same as b0dyn_eq_rec(), but the equilibrium recruitment comes from the fitted SR curve itself (a - b / spr0), not the curve scaled by the mean recruitment deviation. Used only for comparison in 09-b0-restart-test.R
 b0dyn_eq = function(object, sr, residuals = 1) {
   yrs = seq(max(1, dims(object)$min))
   m1 = c(m(object)[, 1])

@@ -12,7 +12,7 @@ library(reshape)
 
 home <- here::here()
 
-# dynamic B0 from a recruitment-adjusted unfished equilibrium start (see 08-b0-restart-test.R)
+# dynamic B0 from a recruitment-adjusted unfished equilibrium start (see 09-b0-restart-test.R)
 source(paste0(home, "/R/functions/b0dyn_eq_rec.R"))
 
 # ML: icesdata is a named list of FLStock objects - one per ICES stock assessment.
@@ -58,14 +58,14 @@ bhs <- (llply(names(icesdata), function(id) {
 names(bhs) <- nms
 bhs <- FLSRs(bhs[!laply(bhs, is.null)])
 
-# ML: Save the filtered icesdata + fitted SRRs so 05-plot-b0-drivers.R can reuse
+# ML: Save the filtered icesdata + fitted SRRs so 07-plot-b0-drivers.R can reuse
 # ML: them without re-fitting ~80 Beverton-Holt models via TMB.
 saveRDS(list(icesdata = icesdata, bhs = bhs), file = paste0(home, "/output/srr_fits.rds"))
 
 # ML: b0dyn_eq_rec() projects the stock forward with F = 0 using the time-varying biological
 # ML: parameters (wt, mat, M) and the fitted SR model. The result is the SSB the stock
 # ML: would have had each year if it had never been fished ("dynamic B0").
-# ML: It starts from the unfished equilibrium numbers-at-age (first-year biology, SR curve scaled by the mean recruitment deviation) instead of the observed numbers-at-age used by b0dyn() (icesdata package); this start was closest to the long-run B0 in the restart test (08-b0-restart-test.R).
+# ML: It starts from the unfished equilibrium numbers-at-age (first-year biology, SR curve scaled by the mean recruitment deviation) instead of the observed numbers-at-age used by b0dyn() (icesdata package); this start was closest to the long-run B0 in the restart test (09-b0-restart-test.R).
 # ML: B0.2 is the same projection but with SR residuals set to zero, giving the
 # ML: deterministic (mean-curve) unfished trajectory.
 dat <- mdply(names(bhs), function(id) {

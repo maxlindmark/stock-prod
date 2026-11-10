@@ -1,0 +1,242 @@
+---
+title: "Which demographic driver carried the 1995-2019 change in B0?"
+author: "Max Lindmark"
+date: today
+date-format: iso
+toc: true
+format:
+  html:
+    page-layout: full
+    embed-resources: true
+knitr:
+  opts_chunk:
+    fig.align: center
+    out-width: 100%
+editor: source
+---
+
+The aim is to split each stock's change in $B_0$ between the late 1990s and the late 2010s into the parts caused by each demographic driver (weight-at-age, maturity, natural mortality and recruitment). For each stock, the steps are:
+
+1. **Reference run.** Project $B_0$ (`b0dyn_eq_rec()`, at $F = 0$) with weight-at-age, maturity and natural mortality fixed at their age-specific means over the whole assessment period, and recruitment exactly on the fitted stock-recruitment curve (no recruitment deviations). Nothing varies over time, so this run gives a constant $B_0$.
+2. **One-driver runs.** Repeat the projection four times, each time letting only one driver vary over time as in the assessment and keeping the other three as in the reference run: (i) weight-at-age, (ii) maturity, (iii) natural mortality, and (iv) recruitment, by adding the estimated stock-recruitment deviations.
+3. **Full run.** Project $B_0$ with all four drivers varying, i.e., the $B_0$ used in the main analysis.
+4. **Components.** In every year, subtract $\log B_0$ of the reference run from $\log B_0$ of each one-driver run. This gives, per driver, a time series of how much higher or lower (in log terms) $B_0$ would be if only that driver had varied. The same difference for the full run gives the total.
+5. **Change over time.** Average each component over 1995--1999 and over 2015--2019, and subtract the early mean from the late mean. This is the change in $\log B_0$ the driver would have caused on its own between the two periods (bars in panel A), and the same for the total is the actual change in $B_0$ (points). Five-year means are used instead of single years because a single year's value depends heavily on that year's recruitment deviation.
+6. **Check.** Because each run is compared to the same reference, the four driver changes should add up to the total change if the drivers act roughly independently. They do (correlation 0.997), so the bars show how the total change is split among the drivers.
+
+Steps 1--4 are the same as in the variance decomposition in `07-plot-b0-drivers.R`; there, the variance of each component over time is used, whereas here we use its change between the two periods.
+
+## Read data and compute components
+
+```{r}
+#| warning: false
+#| message: false
+
+library(FLCore)
+library(FLasher)
+library(plyr)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(patchwork)
+library(ggsidekick)
+theme_set(theme_sleek())
+
+home <- here::here()
+
+# Fix the random number generator so simulated quantities and jittered points are reproducible
+set.seed(42)
+
+source(paste0(home, "/R/functions/b0dyn_eq_rec.R"))
+
+srr_fits <- readRDS(paste0(home, "/output/srr_fits.rds"))
+icesdata <- srr_fits$icesdata
+bhs <- srr_fits$bhs
+
+# Fix an FLQuant slot at its age-specific time-series mean (as in 07-plot-b0-drivers.R)
+fix_to_mean <- function(flq) {
+  means <- apply(flq, c(1, 3, 4, 5, 6), mean, na.rm = TRUE)
+  for (y in seq(dim(flq)[2])) flq[, y, , , , ] <- means
+  flq
+}
+
+# Yearly components of log B0, one driver varying at a time (as in 07-plot-b0-drivers.R)
+comp_dat <- ldply(names(bhs), function(id) {
+  x <- icesdata[[id]]
+  sr <- bhs[[id]]
+
+  x_ref <- x
+  stock.wt(x_ref) <- fix_to_mean(stock.wt(x))
+  mat(x_ref) <- fix_to_mean(mat(x))
+  m(x_ref) <- fix_to_mean(m(x))
+
+  x_wt <- x_ref
+  stock.wt(x_wt) <- stock.wt(x)
+  x_mat <- x_ref
+  mat(x_mat) <- mat(x)
+  x_M <- x_ref
+  m(x_M) <- m(x)
+
+  log_b0 <- function(stk, residuals) log(as.numeric(ssb(b0dyn_eq_rec(stk, sr, residuals = residuals))))
+  ref <- log_b0(x_ref, residuals = 0)
+
+  # Which inputs vary by year in the assessment (as in 07-plot-b0-drivers.R)
+  wt_tv <- !isTRUE(all.equal(as.numeric(stock.wt(x)), as.numeric(stock.wt(x_ref))))
+  mat_tv <- !isTRUE(all.equal(as.numeric(mat(x)), as.numeric(mat(x_ref))))
+  M_tv <- !isTRUE(all.equal(as.numeric(m(x)), as.numeric(m(x_ref))))
+  tv_labs <- c("Wt", "Mat", "M")[c(wt_tv, mat_tv, M_tv)]
+
+  data.frame(
+    tv_group = if (length(tv_labs) == 0) "None t.v." else paste(tv_labs, collapse = " + "),
+    sid = id,
+    year = as.numeric(dimnames(ssb(x))$year),
+    wt = log_b0(x_wt, residuals = 0) - ref,
+    mat = log_b0(x_mat, residuals = 0) - ref,
+    M = log_b0(x_M, residuals = 0) - ref,
+    resid = log_b0(x_ref, residuals = 1) - ref,
+    total = log_b0(x, residuals = 1) - ref
+  )
+}, .id = NULL)
+
+driver_labs <- c(wt = "Weight-at-age", M = "Natural mortality", mat = "Maturity", resid = "SR residuals")
+```
+
+## Change in each component, 1995-2019
+
+```{r}
+# Mean of each component over a 5-year window at each end, to damp single-year recruitment deviations
+win_early <- 1995:1999
+win_late <- 2015:2019
+
+delta <- comp_dat |>
+  mutate(period = case_when(year %in% win_early ~ "early", year %in% win_late ~ "late")) |>
+  filter(!is.na(period)) |>
+  pivot_longer(c(wt, mat, M, resid, total), names_to = "driver", values_to = "comp") |>
+  summarise(comp = mean(comp), n_years = n(), .by = c(sid, tv_group, driver, period)) |>
+  pivot_wider(id_cols = c(sid, tv_group, driver), names_from = period, values_from = c(comp, n_years)) |>
+  mutate(d = comp_late - comp_early) |>
+  filter(n_years_early == length(win_early), n_years_late == length(win_late))
+
+# Use the same stocks as the 1995-2019 trend analysis and regression in 06-glmm-hgam.qmd (only the stock set is taken from there; the direction of change is still from the data)
+delta <- delta |>
+  semi_join(readRDS(paste0(home, "/output/traj_traits.rds")), by = c("sid" = "stock_f"))
+
+# Group by the sign of the total change and order stocks by it
+totals <- delta |>
+  filter(driver == "total") |>
+  arrange(desc(d))
+delta <- delta |>
+  left_join(mutate(totals, sid, trend = factor(ifelse(d < 0, "Decline", "Increase"), levels = c("Decline", "Increase")), .keep = "none"), by = "sid") |>
+  mutate(sid = factor(sid, levels = totals$sid))
+
+count(totals, d < 0)
+
+delta_drv <- delta |>
+  filter(driver != "total") |>
+  mutate(driver = factor(driver_labs[driver], levels = driver_labs))
+
+n_distinct(delta$sid)
+
+# Check: components sum to the total
+delta_w <- delta |>
+  select(sid, trend, driver, d) |>
+  pivot_wider(names_from = driver, values_from = d)
+
+cor(delta_w$total, delta_w$wt + delta_w$mat + delta_w$M + delta_w$resid)
+```
+
+```{r}
+# Median change from each driver alone (in percent) and share of stocks where it is negative, by trend class
+delta_drv |>
+  summarise(median_pct = round(median(100 * (exp(d) - 1)), 1), share_negative = round(mean(d < 0), 2), .by = c(driver, trend)) |>
+  arrange(driver, trend)
+
+# Declining stocks: which driver had the most negative contribution?
+delta_drv |>
+  filter(trend == "Decline") |>
+  slice_min(d, n = 1, by = sid, with_ties = FALSE) |>
+  count(driver, name = "n_stocks_largest_negative")
+```
+
+The contributions add up on the log scale (not in percent), so the bars are stacked in $\log B_0$ and the axes are labelled as percent change in $B_0$. Panel B shows, for stocks that declined or increased, the distribution across stocks of each driver's contribution.
+
+```{r}
+#| fig-height: 10
+
+driver_cols <- setNames(RColorBrewer::brewer.pal(4, "Set2"), driver_labs)
+
+# (A) stacked contributions per stock, ordered by the total change (points)
+p_a <- ggplot(delta_drv, aes(d, sid, fill = driver)) +
+  geom_col() +
+  geom_point(data = filter(delta, driver == "total"), aes(d, sid), inherit.aes = FALSE, size = 0.8) +
+  geom_vline(xintercept = 0, linetype = 2) +
+  scale_fill_manual(values = driver_cols) +
+  scale_x_continuous(breaks = log(1 + c(-75, -50, 0, 100, 200) / 100), labels = paste0(c(-75, -50, 0, 100, 200), "%")) +
+  guides(fill = guide_legend(position = "inside")) +
+  theme(axis.text.y = element_text(size = 6), legend.position.inside = c(0.2, 0.06)) +
+  labs(x = "Change in B0, 1995-1999 to 2015-2019", y = NULL, fill = NULL)
+
+# (B) distribution across stocks of each driver's contribution, for declining and increasing stocks
+trend_n <- count(distinct(delta_drv, sid, trend), trend)
+trend_labeller <- as_labeller(setNames(paste0(trend_n$trend, " (n=", trend_n$n, ")"), trend_n$trend))
+
+p_b <- ggplot(delta_drv, aes(d, driver, color = driver)) +
+  geom_vline(xintercept = 0, linetype = 2) +
+  geom_point(position = position_jitter(width = 0, height = 0.15), alpha = 0.4, size = 0.8) +
+  geom_boxplot(aes(fill = driver), width = 0.3, outlier.shape = NA, alpha = 0.3, linewidth = 0.4) +
+  facet_wrap(~trend, nrow = 1, labeller = trend_labeller) +
+  scale_color_manual(values = driver_cols) +
+  scale_fill_manual(values = driver_cols) +
+  scale_y_discrete(limits = rev(unname(driver_labs))) +
+  scale_x_continuous(breaks = log(1 + c(-75, -50, 0, 100) / 100), labels = paste0(c(-75, -50, 0, 100), "%")) +
+  theme(legend.position = "none") +
+  labs(x = "Change in B0 from this driver alone", y = NULL)
+
+# (C) as (B), but by which inputs are time-varying in the assessment (groups as in 07-plot-b0-drivers.R)
+tv_levels <- c("None t.v.", "Wt", "Wt + M", "Wt + Mat", "Wt + Mat + M")
+tv_n <- count(distinct(delta_drv, sid, tv_group), tv_group)
+tv_labeller <- as_labeller(setNames(paste0(tv_n$tv_group, " (n=", tv_n$n, ")"), tv_n$tv_group))
+
+p_c <- delta_drv |>
+  mutate(tv_group = factor(tv_group, levels = tv_levels)) |>
+  ggplot(aes(d, driver, color = driver)) +
+  geom_vline(xintercept = 0, linetype = 2) +
+  geom_point(position = position_jitter(width = 0, height = 0.15), alpha = 0.4, size = 0.8) +
+  geom_boxplot(aes(fill = driver), width = 0.3, outlier.shape = NA, alpha = 0.3, linewidth = 0.4) +
+  facet_wrap(~tv_group, ncol = 3, labeller = tv_labeller) +
+  scale_color_manual(values = driver_cols) +
+  scale_fill_manual(values = driver_cols) +
+  scale_y_discrete(limits = rev(unname(driver_labs))) +
+  scale_x_continuous(breaks = log(1 + c(-50, 0, 100) / 100), labels = paste0(c(-50, 0, 100), "%")) +
+  theme(legend.position = "none") +
+  labs(x = "Change in B0 from this driver alone", y = NULL)
+
+# (D) share of the absolute change carried by each driver: sum of |change| per driver across the stocks in a group, divided by the sum over all drivers. Ignores direction, so positive and negative contributions both count.
+share_dat <- delta_drv |>
+  summarise(abs_d = sum(abs(d)), .by = c(tv_group, driver)) |>
+  mutate(share = 100 * abs_d / sum(abs_d), .by = tv_group) |>
+  mutate(tv_group = factor(tv_group, levels = tv_levels))
+
+share_dat |>
+  dplyr::select(tv_group, driver, share) |>
+  mutate(share = round(share)) |>
+  pivot_wider(names_from = driver, values_from = share) |>
+  arrange(tv_group)
+
+p_d <- ggplot(share_dat, aes(share, driver, fill = driver)) +
+  geom_col() +
+  facet_wrap(~tv_group, ncol = 3, labeller = tv_labeller) +
+  scale_fill_manual(values = driver_cols) +
+  scale_y_discrete(limits = rev(unname(driver_labs))) +
+  scale_x_continuous(breaks = c(25, 50, 75)) +
+  coord_cartesian(xlim = c(0, 100), expand = FALSE) +
+  theme(legend.position = "none") +
+  labs(x = "% of absolute change in B0", y = NULL)
+
+(p_a | (p_b / p_c / p_d + plot_layout(heights = c(1, 2, 1.4)))) +
+  plot_layout(widths = c(1, 1.1)) +
+  plot_annotation(tag_levels = "A")
+
+ggsave(paste0(home, "/figures/b0_drivers_trends.pdf"),
+  width = 22, height = 20, units = "cm")
+```

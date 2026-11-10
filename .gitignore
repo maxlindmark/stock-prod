@@ -50,3 +50,11 @@ rsconnect/
 
 */env/*
 
+*/scrap/*
+text/*
+
+notes.rtf
+ss3b0.csv
+
+# macOS folder metadata
+.DS_Store

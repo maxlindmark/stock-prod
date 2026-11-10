@@ -1,5 +1,5 @@
 stock,fit_status
-ank.27.78abd,implausible_linf
+ank.27.78abd,ok
 bss.27.4bc7ad-h,implausible_linf
 bss.27.8ab,boundary
 cod.27.22-24,boundary
@@ -27,7 +27,6 @@ mac.27.nea,ok
 meg.27.7b-k8abd,ok
 meg.27.8c9a,ok
 mon.27.78abd,boundary
-mon.27.8c9a,boundary
 pil.27.8abd,ok
 pil.27.8c9a,ok
 ple.27.21-23,ok
@@ -51,7 +50,7 @@ spr.27.3a4,ok
 tur.27.4,ok
 whb.27.1-91214,ok
 whg.27.47d,ok
-whg.27.6a,implausible_linf
+whg.27.6a,ok
 whg.27.7a,implausible_linf
 whg.27.7b-ce-k,ok
 wit.27.3a47d,ok

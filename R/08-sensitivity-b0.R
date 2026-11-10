@@ -18,7 +18,7 @@ home <- here::here()
 # numbers-at-age start: b0dyn() (icesdata package) with its doubling bug fixed
 source(paste0(home, "/R/functions/b0dyn_cor.R"))
 
-# Sensitivity of the main results (04-glmm-hgam.qmd) to how the B0 projection is started:
+# Sensitivity of the main results (06-glmm-hgam.qmd) to how the B0 projection is started:
 # 1) Main run vs the same B0 with the first 10 years of each stock's projection removed, to drop any remaining start-up transient.
 # 2) Main run (recruitment-adjusted equilibrium start, b0dyn_eq_rec()) vs a start from the observed numbers-at-age with fishing removed: b0dyn() (icesdata package) with its doubling bug fixed, b0dyn_cor().
 # For each B0 version the HGAM from 04 is refitted and the global smooth and the per-stock percent change in B0 between 1995 and 2019 are compared with the main run.
@@ -43,7 +43,7 @@ dat_versions <- list(
   "Numbers-at-age start" = dat |> left_join(b0_naa, by = c("stock", "year")) |> mutate(b0 = b0_naa) |> select(-b0_naa)
 )
 
-# Data preparation and model, as in 04-glmm-hgam.qmd
+# Data preparation and model, as in 06-glmm-hgam.qmd
 mid_year <- round(median(1959:2022))
 
 prep_data <- function(dat) {
